@@ -16,12 +16,16 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
 1. **Model line**, always when a model is known: the model id (`anthropic/claude-sonnet-5-5`,
    `lm-studio/glm-5.3`) in 10.5px `muted`, truncated; for a model with no subscription, a second piece
    `· no subscription quota` in 10px `dim`.
-2. **One gauge line per limit**, only for subscription models: a 32px label (`5h`, `7d`, `Fable`, `30d`,
+2. **Context line**, for any model with a known size of last request (subscription or not): label `ctx`,
+   a gauge filled to the context window **used** (always used, not remaining, like the agents' own
+   footers), percent, and a tail with the token count (`353k`, `1.2M`). Red past 85% used, yellow past
+   60%. When only a token count is known (no window), the line reads `<n> tokens` in `muted`.
+3. **One gauge line per limit**, only for subscription models: a 32px label (`5h`, `7d`, `Fable`, `30d`,
    `Cr`) in 10.5px `dim`; a 3px-tall rounded track (`raised`) filled to the shown percent; a 30px percent
    in 10.5px `muted`; a 38px tail in 10px `dim` (time to reset like `1h08`, `2d`; for `Cr` the dollars
    left like `$10.00`).
-3. Nothing at all when the model isn't known yet or the agent has no folder under the home folder.
-4. **Pinned footer**, below the agent list and above the sidebar footer, hidden in the narrow rail: a 1px
+4. Nothing at all when the model isn't known yet or the agent has no folder under the home folder.
+5. **Pinned footer**, below the agent list and above the sidebar footer, hidden in the narrow rail: a 1px
    `border` top line, 16px side padding, 6px vertical, 2px between lines. One 16px line per subscription
    that has data: a 12px provider icon (single-colour glyphs tinted `muted`), then `label value` pills 8px
    apart, label 10px `dim`, value 10.5px semibold coloured like the gauges (`dim` when the reading is older
@@ -49,11 +53,19 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus five modules:
+version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus six modules:
 
-- `quota.js`: `loadQuota(prev, targets)` returns `{ live, cache, used, liveAt, models }`;
-  `agentQuota(q, agent, cwd)` returns `{ model, card, note }` or null; `quotaBlock(t, info, used)` draws it;
-  `modelKind(agent)` is `"omp"`, `"claude"` or null.
+- `quota.js`: `loadQuota(prev, targets)` returns `{ live, cache, contexts, used, liveAt, windows, windowsAt,
+  models }` (`models` entries: `{ model, tokens, sessionId, at }`); `agentQuota(q, agent, cwd)` returns
+  `{ model, card, note, context }` or null; `quotaBlock(t, info, used)` draws it; `modelKind(agent)` is
+  `"omp"`, `"claude"` or null. The model catalog comes from `omp models --json` every 10 min.
+- `context.js`: `ompLastTokens(text)` (assistant `contextSnapshot.promptTokens`, else usage totals),
+  `claudeLastTokens(text)` (last assistant `usage`: input + cache read + cache creation tokens),
+  `parseModelCatalog(json)` (`provider/id` -> `contextWindow`), `catalogWindow(map, model)` (also tries
+  dated Claude ids), `contextOf({ tokens, window, cachedPct })` -> `{ pct, tokens }`, `fmtTokens(n)`.
+  Window: omp models from the catalog by `provider/id`; Claude Code `claude-*` models from the catalog's
+  `anthropic/<id>`; any other Claude Code model has no trusted window, so only the percent the plugin
+  measured per session (`session_contexts` in `claude-statusline.json`, keyed by transcript name) is used.
 - `reports.js`: `parseReports(json)` turns `omp usage --json` into one card per provider. The fill uses
   each limit's `usedFraction` (Anthropic reports percent, Command Code an "unknown" unit). Row labels:
   anthropic `5h`, `7d`, `7d:fable` -> `Fable`; commandcode `5h`, `7d`, `credits` -> `Cr` (+ dollars left).
@@ -90,7 +102,8 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
   alone were wrong (an older session can be the active one).
 - omp assistant messages carry the real provider and model even when no `model_change` was ever written
   (a model from config), so don't rely on `model_change` alone.
-- Do not show context %: Claude and Codex keep it per session and a row can't be matched to a session.
+- Context is per agent, taken from the last request in the agent's transcript, so two agents in one folder
+  share it. Check it against the agent's own footer: an omp pane footer reads like `35.3%/1M`.
 - The Claude and Codex numbers don't depend on which agent row it is; they are per provider.
 - `readTextFile` caps at 1 MiB; transcripts are read with `fs.readFile` and only the last 1,000,000
   characters are scanned.
@@ -108,6 +121,8 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - An omp agent on `lm-studio/glm-5.3` shows the same note; on `commandcode/...` it shows `5h`, `7d` and
   `Cr` with dollars left.
 - With two transcripts in one folder, the model shown is the one in the most recently written file.
+- An omp agent's `ctx` percent matches its own pane footer within about 0.5% (for example `35%` vs
+  `35.3%/1M`), and the token count is the last request's `contextSnapshot.promptTokens`.
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
 - With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /
   cached data, and hovering a line shows the reset times.

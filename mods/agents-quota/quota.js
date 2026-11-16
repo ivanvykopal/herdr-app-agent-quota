@@ -14,10 +14,12 @@ import { parseReports } from "./reports.js";
 import { sessionDirFor, newestTranscript, activeModel, providerOfModel } from "./omp-session.js";
 import { claudeProjectDir, lastClaudeModel, claudeProvider } from "./claude-session.js";
 import { availableSubscriptions, layoutSubscriptions } from "./subscriptions.js";
+import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
 
 const STALE_S = 30 * 60;
 const LIVE_EVERY_MS = 60000; // omp caches usage for 5 min itself
 const MODEL_EVERY_MS = 30000;
+const WINDOWS_EVERY_MS = 600000; // the model catalog (context windows) changes rarely
 const TAIL_CHARS = 1_000_000; // Claude transcripts grow large; the last model is near the end
 
 const homePath = () => home().replace(/\\/g, "/").replace(/\/+$/, "");
@@ -60,22 +62,33 @@ async function fetchLive() {
   try { return parseReports(JSON.parse(r.stdout)); } catch { return null; }
 }
 
+// `omp models --json` -> Map("provider/id" -> context window). ~2 s, so asked rarely.
+async function fetchWindows() {
+  const r = await exec("omp", ["models", "--json"], { timeout: 30000 });
+  if (r.code !== 0) return null;
+  try { return parseModelCatalog(JSON.parse(r.stdout)); } catch { return null; }
+}
+
 async function loadCache() {
   for (const dir of dataDirs()) {
     let names;
     try { names = await fs.readdir(dir); } catch { continue; }
     const cache = new Map();
+    const contexts = new Map(); // Claude Code session id -> context % the plugin measured
     for (const n of names.sort()) {
       if (!n.endsWith(".json") || /\.(original|observation)\.json$/.test(n) || n.includes(".omp-store.") || n === "watch-herdr.json" || n === "icon-attention.json") continue;
       try {
         const text = await readTextFile(`${dir}/${n}`);
-        if (text) for (const c of cardsOf(JSON.parse(text))) if (!cache.has(c.provider)) cache.set(c.provider, c);
+        if (!text) continue;
+        const json = JSON.parse(text);
+        for (const c of cardsOf(json)) if (!cache.has(c.provider)) cache.set(c.provider, c);
+        for (const [id, v] of Object.entries(json.session_contexts ?? {})) if (num(v?.used_percent) !== null) contexts.set(id, v.used_percent);
       } catch { /* half-written file: next tick */ }
     }
     const mode = ((await readTextFile(`${dir}/quota-percent`)) ?? "remaining").trim();
-    return { cache, used: mode === "used" };
+    return { cache, contexts, used: mode === "used" };
   }
-  return { cache: new Map(), used: false };
+  return { cache: new Map(), contexts: new Map(), used: false };
 }
 
 // The newest transcript in `dir` by last write time, asked of the OS (null if it can't tell).
@@ -88,27 +101,30 @@ async function newestByMtime(dir) {
   return r.code === 0 && name ? name : null;
 }
 
-// The model an omp agent is using in `cwd` ("provider/model"): from the most recently written
-// transcript of that folder. Two omp agents in one folder share the answer. null when unknown.
-async function ompModelIn(cwd) {
+// What an omp agent is doing in `cwd`, from the most recently written transcript of that folder:
+// { model: "provider/model", tokens: last request's context size }. Two omp agents in one folder share
+// the answer. null when unknown.
+async function ompInfoIn(cwd) {
   const dir = sessionDirFor(home(), cwd);
   if (!dir) return null;
   const root = `${homePath()}/.omp/agent/sessions/${dir}`;
   try {
     const file = (await newestByMtime(root)) ?? newestTranscript(await fs.readdir(root));
     if (!file) return null;
-    return activeModel((await fs.readFile(`${root}/${file}`, "utf8")).slice(-TAIL_CHARS));
+    const text = (await fs.readFile(`${root}/${file}`, "utf8")).slice(-TAIL_CHARS);
+    return { model: activeModel(text), tokens: ompLastTokens(text), sessionId: null };
   } catch { return null; }
 }
 
-// The model a Claude Code agent is running in `cwd`: last model in the newest transcript of the folder.
-async function claudeModelIn(cwd) {
+// The same for a Claude Code agent; sessionId is the transcript's name (what the plugin keys by).
+async function claudeInfoIn(cwd) {
   const dir = claudeProjectDir(home(), cwd);
   if (!dir) return null;
   try {
     const file = await newestByMtime(dir);
     if (!file) return null;
-    return lastClaudeModel((await fs.readFile(`${dir}/${file}`, "utf8")).slice(-TAIL_CHARS));
+    const text = (await fs.readFile(`${dir}/${file}`, "utf8")).slice(-TAIL_CHARS);
+    return { model: lastClaudeModel(text), tokens: claudeLastTokens(text), sessionId: file.replace(/\.jsonl$/, "") };
   } catch { return null; }
 }
 
@@ -120,9 +136,9 @@ export const modelKind = (agent) => {
 };
 const modelKey = (kind, cwd) => `${kind}\u0000${cwd}`;
 
-// -> { live, cache, used, liveAt, models: Map<kind+cwd, {model, at}> }. `prev` is the last result, so
-// live readings and transcript lookups are reused between asks; `targets` are { kind, cwd } of the
-// omp / Claude Code agents on screen.
+// -> { live, cache, contexts, used, liveAt, windows, windowsAt, models: Map<kind+cwd, {model, tokens,
+// sessionId, at}> }. `prev` is the last result, so live readings, the model catalog and transcript
+// lookups are reused between asks; `targets` are { kind, cwd } of the omp / Claude Code agents on screen.
 export async function loadQuota(prev, targets = []) {
   let live = prev?.live ?? new Map();
   let liveAt = prev?.liveAt ?? 0;
@@ -130,38 +146,52 @@ export async function loadQuota(prev, targets = []) {
     liveAt = Date.now();
     try { live = (await fetchLive()) ?? live; } catch { /* omp missing or offline: keep the last reading */ }
   }
+  let windows = prev?.windows ?? new Map();
+  let windowsAt = prev?.windowsAt ?? 0;
+  if (targets.length && Date.now() - windowsAt >= WINDOWS_EVERY_MS) {
+    windowsAt = Date.now();
+    try { windows = (await fetchWindows()) ?? windows; } catch { /* keep the last catalog */ }
+  }
   const models = new Map();
   for (const { kind, cwd } of targets) {
     const key = modelKey(kind, cwd);
     if (models.has(key)) continue;
     const old = prev?.models?.get(key);
     if (old && Date.now() - old.at < MODEL_EVERY_MS) { models.set(key, old); continue; }
-    models.set(key, { model: kind === "omp" ? await ompModelIn(cwd) : await claudeModelIn(cwd), at: Date.now() });
+    const info = kind === "omp" ? await ompInfoIn(cwd) : await claudeInfoIn(cwd);
+    models.set(key, { model: info?.model ?? null, tokens: info?.tokens ?? null, sessionId: info?.sessionId ?? null, at: Date.now() });
   }
-  return { live, liveAt, models, ...(await loadCache()) };
+  return { live, liveAt, windows, windowsAt, models, ...(await loadCache()) };
 }
 
 // The program key the app reports -> the key the quota sources use.
 const ALIAS = { "claude-code": "claude", "command-code": "commandcode", antigravity: "agy" };
 
-// What to show under an agent: { model, card, note } or null. `cwd` is the agent's live folder.
-// card is null when the active model isn't covered by a subscription we can read.
+// What to show under an agent: { model, card, note, context } or null. `cwd` is the agent's live folder.
+// card is null when the active model isn't covered by a subscription we can read. context is
+// { pct | null, tokens } for how full the context window is (any model, subscription or not).
 export function agentQuota(q, agent, cwd) {
   const kind = modelKind(agent);
   if (kind) {
-    const model = q.models.get(modelKey(kind, cwd))?.model ?? null;
+    const entry = q.models.get(modelKey(kind, cwd));
+    const model = entry?.model ?? null;
     const provider = kind === "claude" ? claudeProvider(model) : providerOfModel(model);
     let card = null;
     if (provider === "anthropic") card = q.live.get("anthropic") ?? q.cache.get("claude") ?? null;
     else if (provider === "commandcode") card = q.live.get("commandcode") ?? null;
     else if (provider === "openai-codex") card = q.cache.get("codex") ?? null;
-    if (!model && !card) return null;
-    return { model, card, note: card ? null : "no subscription quota" };
+    // Window: omp names models "provider/id", the catalog's keys. Claude Code's `claude-*` ids are
+    // Anthropic's; any other model there (a gateway) has no catalog entry we can trust, so only the
+    // percent Claude Code itself measured (the plugin's per-session cache) is used.
+    const window = kind === "omp" ? catalogWindow(q.windows, model) : catalogWindow(q.windows, provider ? `anthropic/${model}` : null);
+    const context = contextOf({ tokens: entry?.tokens ?? null, window, cachedPct: q.contexts.get(entry?.sessionId) ?? null });
+    if (!model && !card && !context) return null;
+    return { model, card, note: card ? null : "no subscription quota", context };
   }
   const raw = agent.program?.key ?? agent.app;
   const key = ALIAS[raw] ?? raw;
   const card = q.live.get(key) ?? q.cache.get(key) ?? null;
-  return card ? { model: null, card, note: null } : null;
+  return card ? { model: null, card, note: null, context: null } : null;
 }
 
 function until(unix) {
@@ -207,13 +237,24 @@ function modelLine(t, model, note) {
     .when(Boolean(note), (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(`· ${note}`)));
 }
 
-// The block under an agent row, indented to line up under its name. Context % is not shown: the
-// cache keeps it per session and an agent row can't be matched to one.
+// How full the context window is: "ctx  ▬▬▬▬  34%  336k". Always % USED (as agents' own footers show it),
+// whatever the quota rows show. Red past 85%, yellow past 60%. Without a percent, just the token count.
+function contextLine(t, ctx) {
+  if (ctx.pct === null) {
+    return h_flex().h(15).flex_none().items_center().gap(6)
+      .child(div().w(32).text_size(10.5).text_color(t.dim).child("ctx"))
+      .child(div().text_size(10.5).text_color(t.muted).child(`${fmtTokens(ctx.tokens)} tokens`));
+  }
+  return line(t, "ctx", ctx.pct, 100 - ctx.pct, ctx.tokens ? fmtTokens(ctx.tokens) : "", false);
+}
+
+// The block under an agent row, indented to line up under its name: model, context, then quota.
 export function quotaBlock(t, info, used) {
   if (!info) return null;
   const now = Date.now() / 1000;
   const rows = [];
   if (info.model !== null || info.note) rows.push(modelLine(t, info.model, info.note));
+  if (info.context) rows.push(contextLine(t, info.context));
   const card = info.card;
   if (card) {
     const stale = card.fetched !== null && now - card.fetched > STALE_S;

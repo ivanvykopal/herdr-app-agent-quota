@@ -15,6 +15,10 @@ subscriptions footer (bottom: Claude Code, Codex, Command Code). The empty space
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
   and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
 - Gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
+- **Context window per agent:** a `ctx` gauge under each omp and Claude Code agent shows how full its
+  context is (**% used**, plus the token count), for subscription and API models alike. Sizes come from
+  `omp models --json`; for a Claude Code gateway model (not `claude-*`) the percent Claude Code itself
+  measured is used if the plugin recorded it, otherwise only the token count is shown.
 - **Pinned subscriptions footer:** a tight strip at the bottom of the panel always shows your Claude Code
   (`5h`, `7d`, `Fbl`), Codex (`30d`) and Command Code (`5h`, `7d`, credits `Cr $…`) limits, whether or not
   an agent is running. Hover a line for reset times. Subscriptions with a running agent come first. With
@@ -80,7 +84,7 @@ Mods are trusted code. This one:
 - Quota is per provider, not per session: two Claude Code agents show the same numbers.
 - The active model comes from the most recently written transcript in the agent's folder, so two omp (or
   two Claude Code) agents in one folder share an answer. Model changes show up within ~40 s.
-- Context % is not shown (it is per session and can't be matched to a row).
+- Context comes from the last request in the agent's transcript, so two agents in one folder share it.
 - It is a modified copy of Herdr's `agents` mod; Herdr never updates it. After an app update, re-clone
   `agents` and re-apply the patch (see `RECIPE.md`, *Built from*).
 
