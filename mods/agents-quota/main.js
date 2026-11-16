@@ -100,7 +100,7 @@ export default class Agents extends View {
     const reloadQuota = (cx) => cx.spawn(async (cx) => {
       const cwds = new Map(panes().map((p) => [p.pane, p.cwd]));
       const targets = agents()
-        .map((a) => ({ kind: modelKind(a), cwd: cwds.get(a.pane) }))
+        .map((a) => ({ kind: modelKind(a), cwd: cwds.get(a.pane), address: a.address, status: a.status }))
         .filter((x) => x.kind && x.cwd);
       this.quota = await loadQuota(this.quota, targets);
       cx.notify();
@@ -271,7 +271,7 @@ export default class Agents extends View {
       const r = row(a, i, subs);
       // Why it is blocked, then the active model, context and limits, right under the row (not in the rail).
       const why = collapsed ? null : blockedRow(t, reportOf(a.address), a.address);
-      const q = collapsed ? null : quotaBlock(t, agentQuota(this.quota, a, cwdOf.get(a.pane)), this.quota.used);
+      const q = collapsed ? null : quotaBlock(t, agentQuota(this.quota, a), this.quota.used);
       const head = [r, why, q].filter(Boolean);
       if (this.folded.has(a.address)) return head;
       return [...head, ...subs.flatMap((s) => [this.subRow(t, s, shown, byPriority), blockedRow(t, reportOf(s.t.address), s.t.address, 64)].filter(Boolean))];
@@ -310,9 +310,9 @@ export default class Agents extends View {
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const paneList = panes();
     const leads = leadPanes(paneList);
-    const cwdOf = new Map(paneList.map((p) => [p.pane, p.cwd]));
+    // (each agent's own transcript is worked out in the loader, so no per-folder lookup is needed here)
     // Providers an agent is using right now: their subscriptions rank first in the footer.
-    const activeProviders = new Set(list.map((a) => agentQuota(this.quota, a, cwdOf.get(a.pane))?.card?.provider).filter(Boolean));
+    const activeProviders = new Set(list.map((a) => agentQuota(this.quota, a)?.card?.provider).filter(Boolean));
     const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
     const labels = new Map(list.map(a => {
       const tab = tabs.get(a.tab);

@@ -86,9 +86,12 @@ Mods are trusted code. This one:
 ## Limits
 
 - Quota is per provider, not per session: two Claude Code agents show the same numbers.
-- The active model comes from the most recently written transcript in the agent's folder, so two omp (or
-  two Claude Code) agents in one folder share an answer. Model changes show up within ~40 s.
-- Context comes from the last request in the agent's transcript, so two agents in one folder share it.
+- Two omp (or two Claude Code) agents in one folder are told apart, each with its own model and context:
+  first by the session title appearing in the terminal title, otherwise by timing (a working agent is
+  writing now; an idle one wrote its last message when it went idle). A transcript older than the agent's
+  terminal is never assigned. If an agent has no transcript yet (omp writes it on the first message), it
+  shows no model rather than a neighbour's. Matching by timing is a best effort when several agents sit
+  idle in one folder. Model changes show up within ~40 s.
 - It is a modified copy of Herdr's `agents` mod; Herdr never updates it. After an app update, re-clone
   `agents` and re-apply the patch (see `RECIPE.md`, *Built from*).
 

@@ -37,4 +37,15 @@ export function activeModel(text) {
   return null;
 }
 
+// The session title omp keeps in the transcript's first line (`{"type":"title","title":"..."}`, rewritten in
+// place as it changes; empty until one is generated). Looks at the head only. null when there is none.
+export function ompTitle(head) {
+  const line = head.split("\n", 1)[0];
+  if (!line.includes('"type":"title"')) return null;
+  try {
+    const t = JSON.parse(line).title;
+    return typeof t === "string" && t ? t : null;
+  } catch { return null; }
+}
+
 export const providerOfModel = (model) => (model && model.includes("/") ? model.split("/")[0] : null);

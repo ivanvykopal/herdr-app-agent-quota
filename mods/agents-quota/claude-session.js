@@ -18,3 +18,11 @@ export function lastClaudeModel(text) {
 // A direct session reports Anthropic's own ids (`claude-*`). Anything else (glm-5.3, kimi-k3, ...) is a
 // gateway or API endpoint, which has its own billing and no Anthropic subscription window.
 export const claudeProvider = (model) => (model && model.startsWith("claude-") ? "anthropic" : null);
+
+// Claude Code's generated session title, from the last `{"type":"ai-title","aiTitle":"..."}` record.
+export function claudeTitle(text) {
+  let found = null;
+  for (const m of text.matchAll(/"type":"ai-title","aiTitle":"((?:[^"\\]|\\.)*)"/g)) found = m[1];
+  if (found === null) return null;
+  try { return JSON.parse(`"${found}"`); } catch { return found; }
+}

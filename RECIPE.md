@@ -59,12 +59,21 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus seven modules:
+version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eight modules:
 
-- `quota.js`: `loadQuota(prev, targets)` returns `{ live, cache, contexts, used, liveAt, windows, windowsAt,
-  models }` (`models` entries: `{ model, tokens, sessionId, at }`); `agentQuota(q, agent, cwd)` returns
-  `{ model, card, note, context }` or null; `quotaBlock(t, info, used)` draws it; `modelKind(agent)` is
-  `"omp"`, `"claude"` or null. The model catalog comes from `omp models --json` every 10 min.
+- `quota.js`: `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp / Claude Code
+  agent) returns `{ live, cache, contexts, used, liveAt, windows, windowsAt, fileCache, models }` (`models`
+  is keyed by agent address, entries `{ model, tokens, sessionId, status, at }`); `agentQuota(q, agent)`
+  returns `{ model, card, note, context }` or null; `quotaBlock(t, info, used)` draws it; `modelKind(agent)`
+  is `"omp"`, `"claude"` or null. Per folder group it lists the newest 8 transcripts with their write times
+  (`powershell Get-ChildItem` on Windows, `ls -t` + `stat` elsewhere), reads each once per (file, mtime),
+  asks `hc get --json <address>` for the agent's `created_ms`, `status_ms` and title, then calls
+  `assignTranscripts`. The model catalog comes from `omp models --json` every 10 min.
+- `assign.js`: `assignTranscripts(agents, candidates, now)` -> Map(agent id -> candidate | null), with agents
+  `{ id, working, statusMs, createdMs, paneTitle }` and candidates `{ file, mtimeMs, title }`. Order: a
+  transcript last written before the terminal started is ineligible; a title match (letters and digits of the
+  session title contained in the terminal title, at least 6 characters) wins; then closest time (a working
+  agent against now, an idle one against `status_ms`), each transcript used once. Unmatched agents get null.
 - `context.js`: `ompLastTokens(text)` (assistant `contextSnapshot.promptTokens`, else usage totals),
   `claudeLastTokens(text)` (last assistant `usage`: input + cache read + cache creation tokens),
   `parseModelCatalog(json)` (`provider/id` -> `contextWindow`), `catalogWindow(map, model)` (also tries
@@ -77,6 +86,8 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus seven 
   permission|question|auth:msg=<base64>`), read from `terminals()[i].report` (or its `status` object).
   Control and escape sequences are stripped and the text capped at 160 characters. The screen is never
   parsed: herdr-core doesn't guess state from screen text, and neither does this.
+- `omp-session.js` / `claude-session.js` also export `ompTitle(head)` (first line `{"type":"title"}` of an
+  omp transcript) and `claudeTitle(text)` (last `ai-title` record).
 - `reports.js`: `parseReports(json)` turns `omp usage --json` into one card per provider. The fill uses
   each limit's `usedFraction` (Anthropic reports percent, Command Code an "unknown" unit). Row labels:
   anthropic `5h`, `7d`, `7d:fable` -> `Fable`; commandcode `5h`, `7d`, `credits` -> `Cr` (+ dollars left).
@@ -109,12 +120,12 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 
 ## Watch out
 
-- Transcript files are picked by last write time, and two agents in one folder share an answer; names
-  alone were wrong (an older session can be the active one).
+- Agents in one folder are told apart by `assign.js`, not by "newest file": an older session can be the active
+  one and two agents can share a folder. Names alone were wrong; file times need the OS (`exec`).
 - omp assistant messages carry the real provider and model even when no `model_change` was ever written
   (a model from config), so don't rely on `model_change` alone.
-- Context is per agent, taken from the last request in the agent's transcript, so two agents in one folder
-  share it. Check it against the agent's own footer: an omp pane footer reads like `35.3%/1M`.
+- Context is per agent, from the last request in that agent's own transcript. Check it against the agent's
+  own footer: an omp pane footer reads like `35.3%/1M`.
 - The Claude and Codex numbers don't depend on which agent row it is; they are per provider.
 - The blocked reason is only as good as what the agent reports: an agent that sends `state=blocked` with no
   `msg` or `kind` shows `Waiting for you`. Test with a throwaway terminal that prints
@@ -134,7 +145,8 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - The same agent on a `glm-*` / `kimi-*` model shows the model and `· no subscription quota`, no gauges.
 - An omp agent on `lm-studio/glm-5.3` shows the same note; on `commandcode/...` it shows `5h`, `7d` and
   `Cr` with dollars left.
-- With two transcripts in one folder, the model shown is the one in the most recently written file.
+- With two agents of one kind in one folder (two transcripts, different models), each row shows its own
+  model and context, and swapping which transcript was written closest to which agent swaps the rows.
 - An omp agent's `ctx` percent matches its own pane footer within about 0.5% (for example `35%` vs
   `35.3%/1M`), and the token count is the last request's `contextSnapshot.promptTokens`.
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.

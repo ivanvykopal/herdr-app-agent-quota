@@ -9,10 +9,11 @@
 import { div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import * as fs from "fs/promises";
-import { home, readTextFile, exec } from "herdr";
+import { home, readTextFile, exec, hc } from "herdr";
 import { parseReports } from "./reports.js";
-import { sessionDirFor, newestTranscript, activeModel, providerOfModel } from "./omp-session.js";
-import { claudeProjectDir, lastClaudeModel, claudeProvider } from "./claude-session.js";
+import { sessionDirFor, newestTranscript, activeModel, ompTitle, providerOfModel } from "./omp-session.js";
+import { claudeProjectDir, lastClaudeModel, claudeProvider, claudeTitle } from "./claude-session.js";
+import { assignTranscripts } from "./assign.js";
 import { availableSubscriptions, layoutSubscriptions } from "./subscriptions.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
 import { blockedReason, reasonText } from "./blocked.js";
@@ -92,41 +93,84 @@ async function loadCache() {
   return { cache: new Map(), contexts: new Map(), used: false };
 }
 
-// The newest transcript in `dir` by last write time, asked of the OS (null if it can't tell).
-// Names alone can't decide: an agent started earlier may be the one still being written to.
-async function newestByMtime(dir) {
+// Transcripts of a folder, newest write first, with their last write time (ms) as the OS knows it:
+// [{ file, mtimeMs }]. Names alone can't say which agent is still writing. Empty if the OS can't tell.
+const MAX_CANDIDATES = 8;
+async function listTranscripts(dir) {
   const r = /^[A-Za-z]:/.test(home())
-    ? await exec("powershell", ["-NoProfile", "-Command", `(Get-ChildItem -LiteralPath '${dir.replace(/'/g, "''")}' -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).Name`], { timeout: 10000 })
-    : await exec("sh", ["-c", 'ls -t "$1"/*.jsonl 2>/dev/null | head -1', "sh", dir], { timeout: 10000 });
-  const name = r.stdout.trim().split(/[\\/]/).pop();
-  return r.code === 0 && name ? name : null;
+    ? await exec("powershell", ["-NoProfile", "-Command", `Get-ChildItem -LiteralPath '${dir.replace(/'/g, "''")}' -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First ${MAX_CANDIDATES} | ForEach-Object { $_.Name + '|' + [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() }`], { timeout: 10000 })
+    : await exec("sh", ["-c", 'for f in $(ls -t "$1"/*.jsonl 2>/dev/null | head -n "$2"); do echo "$(basename "$f")|$(( $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") * 1000 ))"; done', "sh", dir, String(MAX_CANDIDATES)], { timeout: 10000 });
+  if (r.code !== 0) return [];
+  return r.stdout.split(/\r?\n/)
+    .map((l) => l.trim().split("|"))
+    .filter((p) => p.length === 2 && p[0].endsWith(".jsonl") && Number.isFinite(Number(p[1])))
+    .map(([file, ms]) => ({ file, mtimeMs: Number(ms) }));
 }
 
-// What an omp agent is doing in `cwd`, from the most recently written transcript of that folder:
-// { model: "provider/model", tokens: last request's context size }. Two omp agents in one folder share
-// the answer. null when unknown.
-async function ompInfoIn(cwd) {
-  const dir = sessionDirFor(home(), cwd);
-  if (!dir) return null;
-  const root = `${homePath()}/.omp/agent/sessions/${dir}`;
+// What differs between omp and Claude Code: where transcripts live and how to read one.
+const tailOf = (text) => text.slice(-TAIL_CHARS);
+const SPECS = {
+  omp: {
+    root: (cwd) => { const d = sessionDirFor(home(), cwd); return d ? `${homePath()}/.omp/agent/sessions/${d}` : null; },
+    read: (text) => ({ title: ompTitle(text.slice(0, 4096)), model: activeModel(tailOf(text)), tokens: ompLastTokens(tailOf(text)), sessionId: null }),
+  },
+  claude: {
+    root: (cwd) => claudeProjectDir(home(), cwd),
+    read: (text, file) => ({ title: claudeTitle(tailOf(text)), model: lastClaudeModel(tailOf(text)), tokens: claudeLastTokens(tailOf(text)), sessionId: file.replace(/\.jsonl$/, "") }),
+  },
+};
+
+// One agent's own facts from the core: when its terminal started, when its status last changed, its live
+// title. {} when unknown (e.g. a remote machine's terminal).
+async function agentMeta(address) {
+  if (address.includes("/")) return {};
   try {
-    const file = (await newestByMtime(root)) ?? newestTranscript(await fs.readdir(root));
-    if (!file) return null;
-    const text = (await fs.readFile(`${root}/${file}`, "utf8")).slice(-TAIL_CHARS);
-    return { model: activeModel(text), tokens: ompLastTokens(text), sessionId: null };
-  } catch { return null; }
+    const r = await hc(["get", "--json", address]);
+    if (r.code !== 0) return {};
+    const j = JSON.parse(r.stdout);
+    return { createdMs: num(j.created_ms), statusMs: num(j.status_ms), title: typeof j.title === "string" ? j.title : "" };
+  } catch { return {}; }
 }
 
-// The same for a Claude Code agent; sessionId is the transcript's name (what the plugin keys by).
-async function claudeInfoIn(cwd) {
-  const dir = claudeProjectDir(home(), cwd);
-  if (!dir) return null;
-  try {
-    const file = await newestByMtime(dir);
-    if (!file) return null;
-    const text = (await fs.readFile(`${dir}/${file}`, "utf8")).slice(-TAIL_CHARS);
-    return { model: lastClaudeModel(text), tokens: claudeLastTokens(text), sessionId: file.replace(/\.jsonl$/, "") };
-  } catch { return null; }
+// A transcript's facts, read once per (file, last write): { title, model, tokens, sessionId } or null.
+async function readTranscript(spec, root, cand, cache) {
+  const key = `${root}/${cand.file}|${cand.mtimeMs}`;
+  if (cache.has(key)) return cache.get(key);
+  let info = null;
+  try { info = spec.read(await fs.readFile(`${root}/${cand.file}`, "utf8"), cand.file); } catch { /* unreadable: no info */ }
+  cache.set(key, info);
+  if (cache.size > 40) cache.delete(cache.keys().next().value); // oldest first
+  return info;
+}
+
+// Works out which transcript each agent of one group (same kind, same folder) is writing, and reads
+// its model and context. -> Map(address -> { model, tokens, sessionId }). Agents with no transcript of
+// their own get nothing rather than another agent's.
+async function resolveGroup(kind, cwd, members, cache) {
+  const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, sessionId: null }]));
+  const spec = SPECS[kind];
+  const root = spec.root(cwd);
+  if (!root) return out;
+  const metas = [];
+  for (const m of members) metas.push(await agentMeta(m.address));
+  let cands = [];
+  try { cands = await listTranscripts(root); } catch { /* fall through to the name order */ }
+  if (!cands.length && kind === "omp") { // no file times: omp names sort by start time
+    try { const f = newestTranscript(await fs.readdir(root)); if (f) cands = [{ file: f, mtimeMs: Date.now() }]; } catch { /* none */ }
+  }
+  const infos = new Map();
+  for (const c of cands) infos.set(c.file, await readTranscript(spec, root, c, cache));
+  const assigned = assignTranscripts(
+    members.map((m, i) => ({ id: m.address, working: m.status === "working", statusMs: metas[i].statusMs ?? null, createdMs: metas[i].createdMs ?? null, paneTitle: metas[i].title ?? "" })),
+    cands.map((c) => ({ file: c.file, mtimeMs: c.mtimeMs, title: infos.get(c.file)?.title ?? "" })),
+    Date.now(),
+  );
+  for (const m of members) {
+    const c = assigned.get(m.address);
+    const info = c ? infos.get(c.file) : null;
+    if (info) out.set(m.address, { model: info.model, tokens: info.tokens, sessionId: info.sessionId });
+  }
+  return out;
 }
 
 // Which agents have a model to look up: those whose model the app can't tell us.
@@ -135,11 +179,11 @@ export const modelKind = (agent) => {
   if (k === "omp") return "omp";
   return k === "claude" || k === "claude-code" ? "claude" : null;
 };
-const modelKey = (kind, cwd) => `${kind}\u0000${cwd}`;
 
-// -> { live, cache, contexts, used, liveAt, windows, windowsAt, models: Map<kind+cwd, {model, tokens,
-// sessionId, at}> }. `prev` is the last result, so live readings, the model catalog and transcript
-// lookups are reused between asks; `targets` are { kind, cwd } of the omp / Claude Code agents on screen.
+// -> { live, cache, contexts, used, liveAt, windows, windowsAt, fileCache, models: Map<agent address,
+// {model, tokens, sessionId, status, at}> }. `prev` is the last result, so live readings, the model catalog
+// and transcript lookups are reused between asks; `targets` are { kind, cwd, address, status } of the
+// omp / Claude Code agents on screen. Agents sharing a folder are told apart (see assign.js).
 export async function loadQuota(prev, targets = []) {
   let live = prev?.live ?? new Map();
   let liveAt = prev?.liveAt ?? 0;
@@ -153,28 +197,38 @@ export async function loadQuota(prev, targets = []) {
     windowsAt = Date.now();
     try { windows = (await fetchWindows()) ?? windows; } catch { /* keep the last catalog */ }
   }
-  const models = new Map();
-  for (const { kind, cwd } of targets) {
-    const key = modelKey(kind, cwd);
-    if (models.has(key)) continue;
-    const old = prev?.models?.get(key);
-    if (old && Date.now() - old.at < MODEL_EVERY_MS) { models.set(key, old); continue; }
-    const info = kind === "omp" ? await ompInfoIn(cwd) : await claudeInfoIn(cwd);
-    models.set(key, { model: info?.model ?? null, tokens: info?.tokens ?? null, sessionId: info?.sessionId ?? null, at: Date.now() });
+  const fileCache = prev?.fileCache ?? new Map();
+  const groups = new Map();
+  for (const t of targets) {
+    const key = `${t.kind}\u0000${t.cwd}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
   }
-  return { live, liveAt, windows, windowsAt, models, ...(await loadCache()) };
+  const models = new Map();
+  for (const members of groups.values()) {
+    // Redo a group when any member is new, changed status (its transcript just got written) or aged out.
+    const fresh = members.every((m) => {
+      const old = prev?.models?.get(m.address);
+      return old && old.status === m.status && Date.now() - old.at < MODEL_EVERY_MS;
+    });
+    if (fresh) { for (const m of members) models.set(m.address, prev.models.get(m.address)); continue; }
+    const resolved = await resolveGroup(members[0].kind, members[0].cwd, members, fileCache);
+    for (const m of members) models.set(m.address, { ...resolved.get(m.address), status: m.status, at: Date.now() });
+  }
+  return { live, liveAt, windows, windowsAt, fileCache, models, ...(await loadCache()) };
 }
 
 // The program key the app reports -> the key the quota sources use.
 const ALIAS = { "claude-code": "claude", "command-code": "commandcode", antigravity: "agy" };
 
-// What to show under an agent: { model, card, note, context } or null. `cwd` is the agent's live folder.
-// card is null when the active model isn't covered by a subscription we can read. context is
-// { pct | null, tokens } for how full the context window is (any model, subscription or not).
-export function agentQuota(q, agent, cwd) {
+// What to show under an agent: { model, card, note, context } or null. Each agent has its own transcript
+// (see assign.js), so agents in one folder no longer share an answer. card is null when the active model
+// isn't covered by a subscription we can read. context is { pct | null, tokens } for how full the context
+// window is (any model, subscription or not).
+export function agentQuota(q, agent) {
   const kind = modelKind(agent);
   if (kind) {
-    const entry = q.models.get(modelKey(kind, cwd));
+    const entry = q.models.get(agent.address);
     const model = entry?.model ?? null;
     const provider = kind === "claude" ? claudeProvider(model) : providerOfModel(model);
     let card = null;
