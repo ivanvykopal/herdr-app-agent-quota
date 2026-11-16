@@ -6,7 +6,7 @@
 // and omp read the model from their session transcript, so a gateway or API model (glm, kimi, a
 // university cluster, ...) shows its name but no quota.
 
-import { div } from "gpui-kit";
+import { div, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import * as fs from "fs/promises";
 import { home, readTextFile, exec } from "herdr";
@@ -222,4 +222,47 @@ export function quotaBlock(t, info, used) {
     }
   }
   return rows.length ? v_flex().flex_none().pl(33).pr(8).pb(4).gap(1).children(rows) : null;
+}
+
+// Subscriptions shown all the time, whether or not an agent is running: [name, icon, card lookup].
+// Add a row here to pin another provider (the key is `q.live` / `q.cache`'s).
+const PINNED = [
+  { name: "Claude Code", icon: "claude", card: (q) => q.live.get("anthropic") ?? q.cache.get("claude") ?? null },
+  { name: "Codex", icon: "codex", card: (q) => q.cache.get("codex") ?? null },
+];
+const SHORT = { Fable: "Fbl" };
+
+function pill(t, w, used, now, stale) {
+  const label = SHORT[w.label] ?? w.label;
+  const expired = w.resets !== null && w.resets <= now;
+  let color = t.ansi2;
+  if (expired || stale) color = t.dim;
+  else if (w.remaining < 15) color = t.ansi1;
+  else if (w.remaining < 40) color = t.ansi3;
+  const text = expired ? "n/a" : `${Math.round(used ? w.used : w.remaining)}%`;
+  return h_flex().flex_none().items_center().gap(3)
+    .child(div().text_size(10).text_color(t.dim).child(label))
+    .child(div().text_size(10.5).font_semibold().text_color(color).child(text));
+}
+
+// A tight footer: one line per pinned subscription, "icon  5h 87%  7d 80%  Fbl 78%". Hover for resets.
+// null when none of them has data.
+export function summaryFooter(t, q) {
+  const now = Date.now() / 1000;
+  const rows = [];
+  for (const p of PINNED) {
+    const card = p.card(q);
+    if (!card?.windows.length) continue;
+    const stale = card.fetched !== null && now - card.fetched > STALE_S;
+    const resets = card.windows
+      .filter((w) => w.resets !== null)
+      .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
+      .join(" · ");
+    rows.push(h_flex().id(`pinned-${p.icon}`).h(16).flex_none().items_center().gap(8)
+      .tooltip(`${p.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
+      .child(image(`icons/${p.icon}.svg`).w(12).h(12).flex_none())
+      .children(card.windows.map((w) => pill(t, w, q.used, now, stale))));
+  }
+  if (!rows.length) return null;
+  return v_flex().flex_none().px(16).py(6).gap(2).border_t(1).border_color(t.border).children(rows);
 }

@@ -21,6 +21,12 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
    in 10.5px `muted`; a 38px tail in 10px `dim` (time to reset like `1h08`, `2d`; for `Cr` the dollars
    left like `$10.00`).
 3. Nothing at all when the model isn't known yet or the agent has no folder under the home folder.
+4. **Pinned footer**, below the agent list and above the sidebar footer, hidden in the narrow rail: a 1px
+   `border` top line, 16px side padding, 6px vertical, 2px between lines. One 16px line per subscription
+   that has data: a 12px provider icon, then `label value` pills 8px apart, label 10px `dim`, value 10.5px
+   semibold coloured like the gauges (`dim` when the reading is older than 30 min or reset). Claude Code:
+   `5h 87%  7d 80%  Fbl 78%` (Fable shortened to `Fbl`); Codex: `30d 40%`. Hover shows a tooltip with the
+   provider name and reset times.
 
 Fill colour follows what is left, whichever number is shown: `ansi1` (red) under 15% left, `ansi3`
 (yellow) under 40%, `ansi2` (green) otherwise, `dim` when the reading is older than 30 minutes.
@@ -95,3 +101,5 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
   `Cr` with dollars left.
 - With two transcripts in one folder, the model shown is the one in the most recently written file.
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
+- With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /
+  cached data, and hovering a line shows the reset times.

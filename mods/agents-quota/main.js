@@ -3,7 +3,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
-import { loadQuota, agentQuota, modelKind, quotaBlock } from "./quota.js";
+import { loadQuota, agentQuota, modelKind, quotaBlock, summaryFooter } from "./quota.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -469,6 +469,7 @@ export default class Agents extends View {
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
+      .when(!collapsed, (el) => el.child(summaryFooter(t, this.quota) ?? div()))
       .when(collapsed, (el) =>
         el.child(
           h_flex()

@@ -12,6 +12,9 @@ under the agent in the Agents list.
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
   and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
 - Gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
+- **Pinned subscriptions footer:** a tight two-line strip at the bottom of the panel always shows your
+  Claude Code (`5h`, `7d`, `Fbl`) and Codex (`30d`) limits, whether or not an agent is running. Hover for
+  reset times. To pin another provider, add a row to `PINNED` in `quota.js`.
 
 | Active model | Shown |
 |---|---|
