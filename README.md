@@ -4,7 +4,10 @@ A [Herdr desktop app](https://github.com/herdrdev/herdr-app) **mod** that shows 
 model and, when that model has a subscription, its quota (5h / 7d / Fable weekly / credits) directly
 under the agent in the Agents list.
 
-![Agents list with quota](preview.png)
+![Agents with their model and quota, and the pinned subscriptions footer](preview.png)
+
+*Per-agent model and quota (top: a subscription model with limits, an API model with none) and the pinned
+subscriptions footer (bottom: Claude Code, Codex, Command Code). The empty space between them is cropped.*
 
 - **Follows the active model.** A Claude Code or omp agent running a subscription model shows live
   limits. The same agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...) shows
