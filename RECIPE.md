@@ -122,6 +122,13 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 
 - Agents in one folder are told apart by `assign.js`, not by "newest file": an older session can be the active
   one and two agents can share a folder. Names alone were wrong; file times need the OS (`exec`).
+- A remote agent (address `machine/t7`) is read on its machine: `exec(..., { on: machine })` for the home
+  folder (`printf %s "$HOME"`, kept after the first success), the transcript list (`ls -t` + `stat`),
+  and `head -c 4096; tail -c 1000000` of each candidate (`readTextFile` stops at 1 MiB). `omp usage --json`
+  runs there with `~/.local/bin` added to PATH (non-interactive shells lack it) and fills only that
+  machine's agents. Paths outside the home folder use omp's `--<path>--` folder form, remote or local.
+  A remote agent never falls back to this computer's cache or numbers. Reloads can't overlap (`reloading`),
+  because a remote call may take seconds.
 - omp assistant messages carry the real provider and model even when no `model_change` was ever written
   (a model from config), so don't rely on `model_change` alone.
 - Context is per agent, from the last request in that agent's own transcript. Check it against the agent's
@@ -154,3 +161,6 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
   cached data, and hovering a line shows the reset times.
 - A terminal that reports `state=blocked:kind=question:msg=<base64 of "Which database?">` shows
   `Question · Which database?` under its row in the blocked colour; once it reports `working` the line goes.
+- An agent on another machine shows its model and context read from that machine's transcripts, and quota
+  from that machine's own `omp usage`; an agent there whose machine has no usable omp shows
+  `quota not read on <machine>` and still shows model and context.

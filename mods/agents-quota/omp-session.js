@@ -1,15 +1,22 @@
 // Which provider an omp agent is using, from its session transcript. Pure functions, no host calls,
 // so they can be tested with plain `bun`.
 
-// omp keeps `<agent dir>/sessions/<cwd, home stripped, separators -> "-">/<time>_<id>.jsonl`:
-// C:\Users\me\Desktop\Projects -> "-Desktop-Projects", the home folder itself -> "-". Outside the home folder
-// the name is encoded differently ("--C--tmp--"); not handled, so it returns null.
+// omp keeps `<agent dir>/sessions/<name>/<time>_<id>.jsonl`, where <name> encodes the folder:
+//  - inside the home folder: home stripped, separators -> "-": C:\Users\me\Desktop\Projects -> "-Desktop-Projects",
+//    /home/me/work/x -> "-work-x", the home folder itself -> "-";
+//  - anywhere else: the whole path, leading separator dropped, "/", "\" and ":" -> "-", wrapped in "--":
+//    C:\tmp -> "--C--tmp--", /mnt/project/p1/bench -> "--mnt-project-p1-bench--".
+// `home` is the machine's home folder (a remote agent's folder is on that machine, not here).
 export function sessionDirFor(home, cwd) {
   const h = home.replace(/\\/g, "/").replace(/\/+$/, "");
   const c = (cwd ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
   if (!c) return null;
-  if (c.toLowerCase() !== h.toLowerCase() && !c.toLowerCase().startsWith(`${h.toLowerCase()}/`)) return null;
-  return `-${c.slice(h.length).split("/").filter(Boolean).join("-")}`;
+  // Windows paths compare without regard to case; Unix paths are case-sensitive.
+  const fold = /^[A-Za-z]:/.test(h) ? (s) => s.toLowerCase() : (s) => s;
+  if (fold(c) === fold(h) || fold(c).startsWith(`${fold(h)}/`)) {
+    return `-${c.slice(h.length).split("/").filter(Boolean).join("-")}`;
+  }
+  return `--${c.replace(/^\/+/, "").replace(/[/:]/g, "-")}--`;
 }
 
 // File names start with a UTC timestamp, so the last one sorted is the newest session. Only top-level

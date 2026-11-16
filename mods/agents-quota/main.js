@@ -97,14 +97,23 @@ export default class Agents extends View {
     // (read from its transcript by folder): quota shows only if that model has a subscription.
     this.quota = { live: new Map(), cache: new Map(), models: new Map(), used: false };
     this.pinnedOpen = false; // the pinned-subscriptions footer: collapsed to a few, or all
-    const reloadQuota = (cx) => cx.spawn(async (cx) => {
-      const cwds = new Map(panes().map((p) => [p.pane, p.cwd]));
-      const targets = agents()
-        .map((a) => ({ kind: modelKind(a), cwd: cwds.get(a.pane), address: a.address, status: a.status }))
-        .filter((x) => x.kind && x.cwd);
-      this.quota = await loadQuota(this.quota, targets);
-      cx.notify();
-    });
+    this.reloading = false; // a remote machine can answer slowly: never stack reloads on top of each other
+    const reloadQuota = (cx) => {
+      if (this.reloading) return;
+      this.reloading = true;
+      cx.spawn(async (cx) => {
+        try {
+          const cwds = new Map(panes().map((p) => [p.pane, p.cwd]));
+          const targets = agents()
+            .map((a) => ({ kind: modelKind(a), cwd: cwds.get(a.pane), address: a.address, status: a.status }))
+            .filter((x) => x.kind && x.cwd);
+          this.quota = await loadQuota(this.quota, targets);
+        } finally {
+          this.reloading = false;
+        }
+        cx.notify();
+      });
+    };
     cx.timer.every(10000, reloadQuota);
     reloadQuota(cx);
   }
@@ -312,7 +321,8 @@ export default class Agents extends View {
     const leads = leadPanes(paneList);
     // (each agent's own transcript is worked out in the loader, so no per-folder lookup is needed here)
     // Providers an agent is using right now: their subscriptions rank first in the footer.
-    const activeProviders = new Set(list.map((a) => agentQuota(this.quota, a)?.card?.provider).filter(Boolean));
+    // (a remote agent's subscription is another account, so it must not light up the footer's local ones)
+    const activeProviders = new Set(list.filter((a) => !a.address.includes("/")).map((a) => agentQuota(this.quota, a)?.card?.provider).filter(Boolean));
     const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
     const labels = new Map(list.map(a => {
       const tab = tabs.get(a.tab);

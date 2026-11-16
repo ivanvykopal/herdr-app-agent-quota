@@ -81,6 +81,10 @@ Mods are trusted code. This one:
   find the newest session transcript by file time;
 - reads session transcripts under `~/.omp/agent/sessions/` and `~/.claude/projects/` (only the model name
   is used), and, if present, the herdr-agent-usage cache under `~/.../herdr/plugins/herdr-agent-usage/`;
+- for agents on another machine (a Herdr SSH machine), does the same there through the core (`exec` with
+  `on`): `sh` to read the home folder, list transcripts with `ls -t` / `stat`, read the first 4 KiB and last
+  1 MB of the newest ones with `head` / `tail`, and `omp usage --json` once a minute per machine; nothing is
+  copied off the machine except those few lines' worth of model, title and token numbers;
 - makes no network calls of its own and writes no files.
 
 ## Limits
@@ -92,6 +96,11 @@ Mods are trusted code. This one:
   terminal is never assigned. If an agent has no transcript yet (omp writes it on the first message), it
   shows no model rather than a neighbour's. Matching by timing is a best effort when several agents sit
   idle in one folder. Model changes show up within ~40 s.
+- **Remote agents** (omp or Claude Code on another Herdr machine) show their model, context and blocked
+  reason like local ones. Their quota is **that machine's own** `omp usage` (its logins), never this
+  computer's: if omp isn't installed or logged in there, the row says `quota not read on <machine>`. The
+  pinned footer stays local. The remote machine is assumed to be Unix (`sh`, `ls`, `stat`, `head`, `tail`),
+  and its clock is used for matching transcripts to agents. Each refresh costs a few SSH round trips.
 - It is a modified copy of Herdr's `agents` mod; Herdr never updates it. After an app update, re-clone
   `agents` and re-apply the patch (see `RECIPE.md`, *Built from*).
 
