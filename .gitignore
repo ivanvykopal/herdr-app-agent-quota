@@ -1,0 +1,4 @@
+# Written by the Herdr app into mod folders (e.g. by `herdr-app check`)
+mods/*/gpui-kit.d.ts
+mods/*/herdr.d.ts
+mods/*/jsconfig.json

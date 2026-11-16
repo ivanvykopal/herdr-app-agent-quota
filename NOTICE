@@ -1,0 +1,8 @@
+herdr-app-agent-quota
+Copyright 2026 ivanvykopal
+
+mods/agents-quota/main.js is derived from the `agents` mod shipped with the Herdr desktop app
+(https://github.com/herdrdev/herdr-app, Apache License 2.0, mod version 0.1.16). Changes: it imports
+./quota.js, polls quota data in init(), looks up each agent's folder with panes(), and renders the
+active model and quota block under each agent row; four unused-expression / unused-parameter lint nits
+were also fixed. All other files in mods/agents-quota/ are new.
