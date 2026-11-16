@@ -15,6 +15,7 @@ import { sessionDirFor, newestTranscript, activeModel, providerOfModel } from ".
 import { claudeProjectDir, lastClaudeModel, claudeProvider } from "./claude-session.js";
 import { availableSubscriptions, layoutSubscriptions } from "./subscriptions.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
+import { blockedReason, reasonText } from "./blocked.js";
 
 const STALE_S = 30 * 60;
 const LIVE_EVERY_MS = 60000; // omp caches usage for 5 min itself
@@ -246,6 +247,16 @@ function contextLine(t, ctx) {
       .child(div().text_size(10.5).text_color(t.muted).child(`${fmtTokens(ctx.tokens)} tokens`));
   }
   return line(t, "ctx", ctx.pct, 100 - ctx.pct, ctx.tokens ? fmtTokens(ctx.tokens) : "", false);
+}
+
+// Why an agent is blocked, under its row: "Permission · Run: rm -rf build/ ?" in the blocked colour, up to two
+// lines (clipped, nothing scrolls), full text on hover. `report` is the agent's own status record; null
+// unless it is blocked. `key` makes the hover target unique; `pl` lines the text up under the name.
+export function blockedRow(t, report, key, pl = 33) {
+  const text = reasonText(blockedReason(report));
+  if (!text) return null;
+  return div().id(`why-${key}`).flex_none().pl(pl).pr(8).pb(4).max_h(32).overflow_hidden()
+    .text_size(10.5).text_color(t.blocked).tooltip(text).child(text);
 }
 
 // The block under an agent row, indented to line up under its name: model, context, then quota.

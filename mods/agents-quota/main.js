@@ -3,7 +3,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
-import { loadQuota, agentQuota, modelKind, quotaBlock, summaryFooter } from "./quota.js";
+import { loadQuota, agentQuota, modelKind, quotaBlock, summaryFooter, blockedRow } from "./quota.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -241,6 +241,12 @@ export default class Agents extends View {
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    // The agent's own status record (state, kind, msg): where a blocked agent says why.
+    const recs = new Map(all.map((x) => [x.address, x]));
+    const reportOf = (address) => {
+      const r = recs.get(address);
+      return r?.report ?? (r?.status && typeof r.status === "object" ? r.status : null);
+    };
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
@@ -263,11 +269,12 @@ export default class Agents extends View {
     const withKids = (a, i) => {
       const subs = collapsed ? [] : this.tree(all, a.address);
       const r = row(a, i, subs);
-      // The active model and, if it has a subscription, its limits, right under the row (not in the rail).
+      // Why it is blocked, then the active model, context and limits, right under the row (not in the rail).
+      const why = collapsed ? null : blockedRow(t, reportOf(a.address), a.address);
       const q = collapsed ? null : quotaBlock(t, agentQuota(this.quota, a, cwdOf.get(a.pane)), this.quota.used);
-      const head = q ? [r, q] : [r];
+      const head = [r, why, q].filter(Boolean);
       if (this.folded.has(a.address)) return head;
-      return [...head, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      return [...head, ...subs.flatMap((s) => [this.subRow(t, s, shown, byPriority), blockedRow(t, reportOf(s.t.address), s.t.address, 64)].filter(Boolean))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.

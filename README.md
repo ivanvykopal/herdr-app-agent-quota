@@ -15,6 +15,10 @@ subscriptions footer (bottom: Claude Code, Codex, Command Code). The empty space
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
   and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
 - Gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
+- **Why an agent is blocked:** under a blocked agent's row (including sub-agents) the mod shows what it
+  is waiting for, e.g. `Permission · Run: rm -rf build/ ?` or `Question · Which database?`, in the blocked
+  colour. It uses the agent's own status report (OSC 7501 `kind` and `msg`), never the screen, so an agent
+  that doesn't send them shows only `Waiting for you`.
 - **Context window per agent:** a `ctx` gauge under each omp and Claude Code agent shows how full its
   context is (**% used**, plus the token count), for subscription and API models alike. Sizes come from
   `omp models --json`; for a Claude Code gateway model (not `claude-*`) the percent Claude Code itself

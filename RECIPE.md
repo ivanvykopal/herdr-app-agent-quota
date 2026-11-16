@@ -35,6 +35,12 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
    listed first. With more than 3, only 3 show plus a 14px `> +N more` row (10px `dim`, chevron);
    clicking it opens the list in place, growing to show every row with no scrolling and no clipping, and
    the row becomes `v less`.
+6. **Blocked reason**, directly under the row (and under a blocked sub-agent's row, indented 64px) of an
+   agent whose own status report is `blocked`: 10.5px text in the `blocked` colour, up to two lines
+   (clipped, never scrolling), full text on hover. It reads `<Kind> · <message>`, e.g.
+   `Permission · Run: rm -rf build/ ? Allow this command` or `Question · Which database should I use?`;
+   kinds `permission`, `question`, `auth` (shown `Sign-in`); with neither it says `Waiting for you`.
+   Nothing is shown for an agent that isn't blocked. It sits above the model / context / quota lines.
 
 Fill colour follows what is left, whichever number is shown: `ansi1` (red) under 15% left, `ansi3`
 (yellow) under 40%, `ansi2` (green) otherwise, `dim` when the reading is older than 30 minutes.
@@ -53,7 +59,7 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus six modules:
+version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus seven modules:
 
 - `quota.js`: `loadQuota(prev, targets)` returns `{ live, cache, contexts, used, liveAt, windows, windowsAt,
   models }` (`models` entries: `{ model, tokens, sessionId, at }`); `agentQuota(q, agent, cwd)` returns
@@ -66,6 +72,11 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus six mo
   Window: omp models from the catalog by `provider/id`; Claude Code `claude-*` models from the catalog's
   `anthropic/<id>`; any other Claude Code model has no trusted window, so only the percent the plugin
   measured per session (`session_contexts` in `claude-statusline.json`, keyed by transcript name) is used.
+- `blocked.js`: `blockedReason(report)` -> `{ kind, msg }` or null (null unless `report.state` is
+  `blocked`) and `reasonText(reason)`. `report` is the agent's own OSC 7501 record (`state=blocked:kind=
+  permission|question|auth:msg=<base64>`), read from `terminals()[i].report` (or its `status` object).
+  Control and escape sequences are stripped and the text capped at 160 characters. The screen is never
+  parsed: herdr-core doesn't guess state from screen text, and neither does this.
 - `reports.js`: `parseReports(json)` turns `omp usage --json` into one card per provider. The fill uses
   each limit's `usedFraction` (Anthropic reports percent, Command Code an "unknown" unit). Row labels:
   anthropic `5h`, `7d`, `7d:fable` -> `Fable`; commandcode `5h`, `7d`, `credits` -> `Cr` (+ dollars left).
@@ -105,6 +116,9 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - Context is per agent, taken from the last request in the agent's transcript, so two agents in one folder
   share it. Check it against the agent's own footer: an omp pane footer reads like `35.3%/1M`.
 - The Claude and Codex numbers don't depend on which agent row it is; they are per provider.
+- The blocked reason is only as good as what the agent reports: an agent that sends `state=blocked` with no
+  `msg` or `kind` shows `Waiting for you`. Test with a throwaway terminal that prints
+  `ESC ] 7501 ; state=blocked:kind=permission:app=test:msg=<base64> ESC \` (kill and `hc rm` it afterwards).
 - `readTextFile` caps at 1 MiB; transcripts are read with `fs.readFile` and only the last 1,000,000
   characters are scanned.
 - The mod replaces the whole Agents panel; a layout must reference `agents-quota`. Shipped layouts are
@@ -126,3 +140,5 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
 - With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /
   cached data, and hovering a line shows the reset times.
+- A terminal that reports `state=blocked:kind=question:msg=<base64 of "Which database?">` shows
+  `Question · Which database?` under its row in the blocked colour; once it reports `working` the line goes.
