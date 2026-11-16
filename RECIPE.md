@@ -23,10 +23,14 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
 3. Nothing at all when the model isn't known yet or the agent has no folder under the home folder.
 4. **Pinned footer**, below the agent list and above the sidebar footer, hidden in the narrow rail: a 1px
    `border` top line, 16px side padding, 6px vertical, 2px between lines. One 16px line per subscription
-   that has data: a 12px provider icon, then `label value` pills 8px apart, label 10px `dim`, value 10.5px
-   semibold coloured like the gauges (`dim` when the reading is older than 30 min or reset). Claude Code:
-   `5h 87%  7d 80%  Fbl 78%` (Fable shortened to `Fbl`); Codex: `30d 40%`. Hover shows a tooltip with the
-   provider name and reset times.
+   that has data: a 12px provider icon (single-colour glyphs tinted `muted`), then `label value` pills 8px
+   apart, label 10px `dim`, value 10.5px semibold coloured like the gauges (`dim` when the reading is older
+   than 30 min or reset). Claude Code: `5h 87%  7d 80%  Fbl 78%` (Fable shortened to `Fbl`); Codex:
+   `30d 40%`; Command Code: `5h 100%  7d 100%  Cr $10.00` (credits show the dollars left, not a percent).
+   Hover shows a tooltip with the provider name and reset times. Subscriptions with a running agent are
+   listed first. With more than 3, only 3 show plus a 14px `> +N more` row (10px `dim`, chevron);
+   clicking it opens the list in place, growing to show every row with no scrolling and no clipping, and
+   the row becomes `v less`.
 
 Fill colour follows what is left, whichever number is shown: `ansi1` (red) under 15% left, `ansi3`
 (yellow) under 40%, `ansi2` (green) otherwise, `dim` when the reading is older than 30 minutes.
@@ -53,6 +57,10 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus five m
 - `reports.js`: `parseReports(json)` turns `omp usage --json` into one card per provider. The fill uses
   each limit's `usedFraction` (Anthropic reports percent, Command Code an "unknown" unit). Row labels:
   anthropic `5h`, `7d`, `7d:fable` -> `Fable`; commandcode `5h`, `7d`, `credits` -> `Cr` (+ dollars left).
+- `subscriptions.js`: `SUBSCRIPTIONS`, the registry of pinned subscriptions (`id`, `name`, `icon`, `tint`,
+  `providers`, `card(q)`), `availableSubscriptions(q)` (those with data) and `layoutSubscriptions(items,
+  active, open, limit)` (active first, then at most `limit` unless open) -> `{ shown, hidden, collapsible }`.
+  To add one: an entry here, plus its provider in `reports.js` `LABELS` when live data exists.
 - `omp-session.js`: omp transcripts live in `~/.omp/agent/sessions/<cwd minus home, separators to "-">/`
   (home itself is `-`). `activeModel(text)` scans lines from the end and returns the first of an assistant
   message (`message.provider` + `message.model` -> `provider/model`) or a `model_change` entry (`model`).

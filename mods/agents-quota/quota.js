@@ -6,13 +6,14 @@
 // and omp read the model from their session transcript, so a gateway or API model (glm, kimi, a
 // university cluster, ...) shows its name but no quota.
 
-import { div, image } from "gpui-kit";
+import { div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import * as fs from "fs/promises";
 import { home, readTextFile, exec } from "herdr";
 import { parseReports } from "./reports.js";
 import { sessionDirFor, newestTranscript, activeModel, providerOfModel } from "./omp-session.js";
 import { claudeProjectDir, lastClaudeModel, claudeProvider } from "./claude-session.js";
+import { availableSubscriptions, layoutSubscriptions } from "./subscriptions.js";
 
 const STALE_S = 30 * 60;
 const LIVE_EVERY_MS = 60000; // omp caches usage for 5 min itself
@@ -114,7 +115,8 @@ async function claudeModelIn(cwd) {
 // Which agents have a model to look up: those whose model the app can't tell us.
 export const modelKind = (agent) => {
   const k = agent.program?.key ?? agent.app;
-  return k === "omp" ? "omp" : k === "claude" || k === "claude-code" ? "claude" : null;
+  if (k === "omp") return "omp";
+  return k === "claude" || k === "claude-code" ? "claude" : null;
 };
 const modelKey = (kind, cwd) => `${kind}\u0000${cwd}`;
 
@@ -224,12 +226,8 @@ export function quotaBlock(t, info, used) {
   return rows.length ? v_flex().flex_none().pl(33).pr(8).pb(4).gap(1).children(rows) : null;
 }
 
-// Subscriptions shown all the time, whether or not an agent is running: [name, icon, card lookup].
-// Add a row here to pin another provider (the key is `q.live` / `q.cache`'s).
-const PINNED = [
-  { name: "Claude Code", icon: "claude", card: (q) => q.live.get("anthropic") ?? q.cache.get("claude") ?? null },
-  { name: "Codex", icon: "codex", card: (q) => q.cache.get("codex") ?? null },
-];
+// Footer: pinned subscriptions (see subscriptions.js). More than this many collapse behind "+N more".
+export const PINNED_VISIBLE = 3;
 const SHORT = { Fable: "Fbl" };
 
 function pill(t, w, used, now, stale) {
@@ -239,30 +237,47 @@ function pill(t, w, used, now, stale) {
   if (expired || stale) color = t.dim;
   else if (w.remaining < 15) color = t.ansi1;
   else if (w.remaining < 40) color = t.ansi3;
-  const text = expired ? "n/a" : `${Math.round(used ? w.used : w.remaining)}%`;
+  let text = `${Math.round(used ? w.used : w.remaining)}%`;
+  if (w.label === "Cr" && w.tail) text = w.tail; // credits: the money left says more than a percent
+  if (expired) text = "n/a";
   return h_flex().flex_none().items_center().gap(3)
     .child(div().text_size(10).text_color(t.dim).child(label))
     .child(div().text_size(10.5).font_semibold().text_color(color).child(text));
 }
 
-// A tight footer: one line per pinned subscription, "icon  5h 87%  7d 80%  Fbl 78%". Hover for resets.
-// null when none of them has data.
-export function summaryFooter(t, q) {
+function subscriptionRow(t, s, used, now) {
+  const card = s.data;
+  const stale = card.fetched !== null && now - card.fetched > STALE_S;
+  const resets = card.windows
+    .filter((w) => w.resets !== null)
+    .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
+    .join(" · ");
+  const file = `icons/${s.icon}.svg`;
+  const pic = s.tint ? svg(file).size(12).flex_none().text_color(t.muted) : image(file).w(12).h(12).flex_none();
+  return h_flex().id(`pinned-${s.id}`).h(16).flex_none().items_center().gap(8)
+    .tooltip(`${s.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
+    .child(pic)
+    .children(card.windows.map((w) => pill(t, w, used, now, stale)));
+}
+
+// A tight footer, one line per subscription that has data: "icon  5h 87%  7d 80%  Fbl 78%". Hover for
+// resets. Subscriptions with a running agent come first. Past PINNED_VISIBLE the rest hide behind a
+// "+N more" row; opened, the list simply grows to show every row (no scrolling, nothing clipped).
+// `ui` = { active: Set of provider ids with a running agent, open, toggle(e, cx) }. null when no
+// subscription has data.
+export function summaryFooter(t, q, ui) {
   const now = Date.now() / 1000;
-  const rows = [];
-  for (const p of PINNED) {
-    const card = p.card(q);
-    if (!card?.windows.length) continue;
-    const stale = card.fetched !== null && now - card.fetched > STALE_S;
-    const resets = card.windows
-      .filter((w) => w.resets !== null)
-      .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
-      .join(" · ");
-    rows.push(h_flex().id(`pinned-${p.icon}`).h(16).flex_none().items_center().gap(8)
-      .tooltip(`${p.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
-      .child(image(`icons/${p.icon}.svg`).w(12).h(12).flex_none())
-      .children(card.windows.map((w) => pill(t, w, q.used, now, stale))));
-  }
-  if (!rows.length) return null;
-  return v_flex().flex_none().px(16).py(6).gap(2).border_t(1).border_color(t.border).children(rows);
+  const { shown, hidden, collapsible } = layoutSubscriptions(availableSubscriptions(q), ui.active, ui.open, PINNED_VISIBLE);
+  if (!shown.length) return null;
+  const list = v_flex().id("pinned-list").gap(2)
+    .children(shown.map((s) => subscriptionRow(t, s, q.used, now)));
+  const toggle = h_flex().id("pinned-toggle").h(14).flex_none().items_center().gap(4)
+    .text_size(10).text_color(t.dim).cursor_pointer()
+    .hover((e) => e.text_color(t.foreground))
+    .on_click(ui.toggle)
+    .child(svg(`mods/workspace-chrome/chevron-${ui.open ? "down" : "right"}.svg`).size(10).flex_none())
+    .child(div().child(ui.open ? "less" : `+${hidden} more`));
+  return v_flex().flex_none().px(16).py(6).gap(2).border_t(1).border_color(t.border)
+    .child(list)
+    .when(collapsible, (e) => e.child(toggle));
 }

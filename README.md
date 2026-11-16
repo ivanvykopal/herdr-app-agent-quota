@@ -12,9 +12,13 @@ under the agent in the Agents list.
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
   and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
 - Gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
-- **Pinned subscriptions footer:** a tight two-line strip at the bottom of the panel always shows your
-  Claude Code (`5h`, `7d`, `Fbl`) and Codex (`30d`) limits, whether or not an agent is running. Hover for
-  reset times. To pin another provider, add a row to `PINNED` in `quota.js`.
+- **Pinned subscriptions footer:** a tight strip at the bottom of the panel always shows your Claude Code
+  (`5h`, `7d`, `Fbl`), Codex (`30d`) and Command Code (`5h`, `7d`, credits `Cr $…`) limits, whether or not
+  an agent is running. Hover a line for reset times. Subscriptions with a running agent come first. With
+  more than 3, the rest collapse behind a `+N more` row that expands the list (no scrolling).
+- **Adding a subscription** is data, not UI code: add its provider to `LABELS` in `reports.js` (live data
+  from `omp usage --json`; skip for cache-only providers) and one entry to `SUBSCRIPTIONS` in
+  `subscriptions.js` (name, icon, which card to use). It then appears in the footer by itself.
 
 | Active model | Shown |
 |---|---|

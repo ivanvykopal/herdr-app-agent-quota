@@ -96,6 +96,7 @@ export default class Agents extends View {
     // Live limits (omp usage), the plugin's cache, and each omp / Claude Code agent's active model
     // (read from its transcript by folder): quota shows only if that model has a subscription.
     this.quota = { live: new Map(), cache: new Map(), models: new Map(), used: false };
+    this.pinnedOpen = false; // the pinned-subscriptions footer: collapsed to a few, or all
     const reloadQuota = (cx) => cx.spawn(async (cx) => {
       const cwds = new Map(panes().map((p) => [p.pane, p.cwd]));
       const targets = agents()
@@ -303,6 +304,8 @@ export default class Agents extends View {
     const paneList = panes();
     const leads = leadPanes(paneList);
     const cwdOf = new Map(paneList.map((p) => [p.pane, p.cwd]));
+    // Providers an agent is using right now: their subscriptions rank first in the footer.
+    const activeProviders = new Set(list.map((a) => agentQuota(this.quota, a, cwdOf.get(a.pane))?.card?.provider).filter(Boolean));
     const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
     const labels = new Map(list.map(a => {
       const tab = tabs.get(a.tab);
@@ -469,7 +472,11 @@ export default class Agents extends View {
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
-      .when(!collapsed, (el) => el.child(summaryFooter(t, this.quota) ?? div()))
+      .when(!collapsed, (el) => el.child(summaryFooter(t, this.quota, {
+        active: activeProviders,
+        open: this.pinnedOpen,
+        toggle: (_e, cx) => { this.pinnedOpen = !this.pinnedOpen; cx.notify(); },
+      }) ?? div()))
       .when(collapsed, (el) =>
         el.child(
           h_flex()
