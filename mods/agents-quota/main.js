@@ -296,6 +296,8 @@ export default class Agents extends View {
   render(_cx) {
     const t = theme();
     if (props()?.sortMenu) return this.sortMenu(t);
+    if (props()?.statusMenu) return this.statusMenu(t);
+    if (props()?.status) return this.statusBar(t);
     const collapsed = narrow();
     const sort = sortOf();
     let list = agents();
