@@ -59,13 +59,14 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eight modules:
+version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus nine modules:
 
-- `quota.js`: `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp / Claude Code
+- `quota.js`: `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp / Claude Code / Command Code
   agent) returns `{ live, cache, contexts, used, liveAt, windows, windowsAt, fileCache, models }` (`models`
   is keyed by agent address, entries `{ model, tokens, sessionId, status, at }`); `agentQuota(q, agent)`
   returns `{ model, card, note, context }` or null; `quotaBlock(t, info, used)` draws it; `modelKind(agent)`
-  is `"omp"`, `"claude"` or null. Per folder group it lists the newest 8 transcripts with their write times
+  is `"omp"`, `"claude"`, `"commandcode"` (program key `command-code`) or null. Per folder group it lists
+  the newest 8 transcripts (`*.checkpoints.jsonl` excluded) with their write times
   (`powershell Get-ChildItem` on Windows, `ls -t` + `stat` elsewhere), reads each once per (file, mtime),
   asks `hc get --json <address>` for the agent's `created_ms`, `status_ms` and title, then calls
   `assignTranscripts`. The model catalog comes from `omp models --json` every 10 min.
@@ -74,6 +75,12 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eight 
   transcript last written before the terminal started is ineligible; a title match (letters and digits of the
   session title contained in the terminal title, at least 6 characters) wins; then closest time (a working
   agent against now, an idle one against `status_ms`), each transcript used once. Unmatched agents get null.
+- `commandcode-session.js`: `commandcodeProjectDir(names, cwd)` picks the `~/.commandcode/projects` entry
+  whose letters and digits equal the cwd's (Command Code's slug splits camelCase: `AppData` -> `app-data`, so
+  don't rebuild it); `lastCommandcodeModel(text)` is the last top-level `"model"` (assistant messages and
+  `model_change` records, e.g. `recursive/flint-v1.0:free`); `commandcodeLastTokens(text)` is the last
+  assistant line's `usage.inputTokens` (cache reads included; what Command Code's compaction measures).
+  Window: catalog key `commandcode/<model>`. Every Command Code model gets the Command Code card. Local only.
 - `context.js`: `ompLastTokens(text)` (assistant `contextSnapshot.promptTokens`, else usage totals),
   `claudeLastTokens(text)` (last assistant `usage`: input + cache read + cache creation tokens),
   `parseModelCatalog(json)` (`provider/id` -> `contextWindow`), `catalogWindow(map, model)` (also tries
@@ -143,6 +150,16 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
   read-only, so clone one first. The clone is never updated by Herdr.
 - `herdr-app check` really runs `omp usage` (a warning says so).
 - Dash-prefixed folder names (`-Desktop-...`) need `./` or `--` in shell commands when debugging.
+- Command Code never sends OSC 7501, so Herdr doesn't list it as an agent without
+  `integrations/commandcode/` (Windows). Its hooks (`~/.commandcode/settings.json`: `SessionStart` -> idle,
+  `PreToolUse`/`PostToolUse` -> working, `Stop` -> idle, all `async`) run with piped stdio and
+  `windowsHide`, so their output never reaches the terminal: the hook `AttachConsole`s to the nearest
+  `node.exe` ancestor and writes to `CONOUT$` (`CreateFileW`; .NET's `File.Open("CONOUT$")` makes a file).
+  It reports `app=command-code`, Herdr's program key (icon; `ALIAS` maps it to the quota card); `commandcode`
+  matches nothing and shows a generic icon with no quota. A hidden watcher started on `SessionStart` sends
+  `state=clear` when Command Code exits. Headless runs (`-p`/`--print`) are ignored, because they may share
+  another agent's terminal. There is no prompt or permission hook: working starts at the first tool call,
+  and blocked is never shown.
 
 ## Done when
 
@@ -156,6 +173,9 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
   model and context, and swapping which transcript was written closest to which agent swaps the rows.
 - An omp agent's `ctx` percent matches its own pane footer within about 0.5% (for example `35%` vs
   `35.3%/1M`), and the token count is the last request's `contextSnapshot.promptTokens`.
+- A `commandcode` agent (with the hook) shows its model as in its transcript (`recursive/flint-v1.0:free`),
+  then `ctx` with the last `usage.inputTokens` over the catalog window (25,519 / 262,144 -> `10%  26k`),
+  then `5h`, `7d`, `Cr`.
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
 - With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /
   cached data, and hovering a line shows the reset times.

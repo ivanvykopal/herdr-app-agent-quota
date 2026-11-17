@@ -13,6 +13,7 @@ import { home, readTextFile, exec, hc } from "herdr";
 import { parseReports } from "./reports.js";
 import { sessionDirFor, newestTranscript, activeModel, ompTitle, providerOfModel } from "./omp-session.js";
 import { claudeProjectDir, lastClaudeModel, claudeProvider, claudeTitle } from "./claude-session.js";
+import { commandcodeProjectDir, lastCommandcodeModel, commandcodeLastTokens } from "./commandcode-session.js";
 import { assignTranscripts } from "./assign.js";
 import { availableSubscriptions, orderSubscriptions } from "./subscriptions.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
@@ -104,12 +105,12 @@ async function loadCache() {
 // [{ file, mtimeMs }]. Names alone can't say which agent is still writing. Empty if the OS can't tell.
 // `machine` null = this computer; else that machine, through the core (assumed Unix).
 const MAX_CANDIDATES = 8;
-const LIST_SH = 'for f in $(ls -t "$1"/*.jsonl 2>/dev/null | head -n "$2"); do echo "$(basename "$f")|$(( $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") * 1000 ))"; done';
+const LIST_SH = 'for f in $(ls -t "$1"/*.jsonl 2>/dev/null | grep -v "\\.checkpoints\\.jsonl$" | head -n "$2"); do echo "$(basename "$f")|$(( $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") * 1000 ))"; done';
 async function listTranscripts(dir, machine) {
   let r;
   if (machine) r = await exec("sh", ["-c", LIST_SH, "sh", dir, String(MAX_CANDIDATES)], { on: machine, timeout: 30000 });
   else if (/^[A-Za-z]:/.test(home())) {
-    r = await exec("powershell", ["-NoProfile", "-Command", `Get-ChildItem -LiteralPath '${dir.replace(/'/g, "''")}' -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First ${MAX_CANDIDATES} | ForEach-Object { $_.Name + '|' + [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() }`], { timeout: 10000 });
+    r = await exec("powershell", ["-NoProfile", "-Command", `Get-ChildItem -LiteralPath '${dir.replace(/'/g, "''")}' -Filter *.jsonl -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.checkpoints.jsonl' } | Sort-Object LastWriteTime -Descending | Select-Object -First ${MAX_CANDIDATES} | ForEach-Object { $_.Name + '|' + [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() }`], { timeout: 10000 });
   } else r = await exec("sh", ["-c", LIST_SH, "sh", dir, String(MAX_CANDIDATES)], { timeout: 10000 });
   if (r.code !== 0) return [];
   return r.stdout.split(/\r?\n/)
@@ -131,8 +132,9 @@ async function homeOf(machine, homes) {
   return h;
 }
 
-// What differs between omp and Claude Code: where transcripts live (under the machine's `h`ome) and how
-// to read one.
+// What differs between omp, Claude Code and Command Code: where transcripts live (under the machine's
+// `h`ome; `root` may be async) and how to read one. Command Code's folder needs a directory listing,
+// so it is found on this computer only (the status hook that lists it as an agent is Windows-only).
 const tailOf = (text) => text.slice(-TAIL_CHARS);
 const SPECS = {
   omp: {
@@ -142,6 +144,14 @@ const SPECS = {
   claude: {
     root: (cwd, h) => claudeProjectDir(h, cwd),
     read: (text, file) => ({ title: claudeTitle(tailOf(text)), model: lastClaudeModel(tailOf(text)), tokens: claudeLastTokens(tailOf(text)), sessionId: file.replace(/\.jsonl$/, "") }),
+  },
+  commandcode: {
+    root: async (cwd, h, machine) => {
+      if (machine) return null;
+      const base = `${h.replace(/\\/g, "/")}/.commandcode/projects`;
+      try { const d = commandcodeProjectDir(await fs.readdir(base), cwd); return d ? `${base}/${d}` : null; } catch { return null; }
+    },
+    read: (text) => ({ title: null, model: lastCommandcodeModel(tailOf(text)), tokens: commandcodeLastTokens(tailOf(text)), sessionId: null }),
   },
 };
 
@@ -185,7 +195,7 @@ async function resolveGroup(kind, cwd, machine, members, cache, homes) {
   const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, sessionId: null }]));
   const spec = SPECS[kind];
   const h = await homeOf(machine, homes);
-  const root = h ? spec.root(cwd, h) : null;
+  const root = h ? await spec.root(cwd, h, machine) : null;
   if (!root) return out;
   const metas = [];
   for (const m of members) metas.push(await agentMeta(m.address));
@@ -213,6 +223,7 @@ async function resolveGroup(kind, cwd, machine, members, cache, homes) {
 export const modelKind = (agent) => {
   const k = agent.program?.key ?? agent.app;
   if (k === "omp") return "omp";
+  if (k === "command-code" || k === "commandcode") return "commandcode";
   return k === "claude" || k === "claude-code" ? "claude" : null;
 };
 
@@ -281,15 +292,19 @@ export function agentQuota(q, agent) {
   if (kind) {
     const entry = q.models.get(agent.address);
     const model = entry?.model ?? null;
-    const provider = kind === "claude" ? claudeProvider(model) : providerOfModel(model);
+    // Command Code bills every model it serves (its own ids, e.g. `recursive/flint-v1.0:free`) to its plan.
+    const provider = kind === "claude" ? claudeProvider(model) : kind === "commandcode" ? "commandcode" : providerOfModel(model);
     let card = null;
     if (provider === "anthropic") card = live.get("anthropic") ?? cache.get("claude") ?? null;
     else if (provider === "commandcode") card = live.get("commandcode") ?? null;
     else if (provider === "openai-codex") card = cache.get("codex") ?? null;
-    // Window: omp names models "provider/id", the catalog's keys. Claude Code's `claude-*` ids are
-    // Anthropic's; any other model there (a gateway) has no catalog entry we can trust, so only the
-    // percent Claude Code itself measured (the plugin's per-session cache) is used.
-    const window = kind === "omp" ? catalogWindow(q.windows, model) : catalogWindow(q.windows, provider ? `anthropic/${model}` : null);
+    // Window: omp names models "provider/id", the catalog's keys; Command Code's ids are the catalog's
+    // `commandcode/<id>`. Claude Code's `claude-*` ids are Anthropic's; any other model there (a gateway)
+    // has no catalog entry we can trust, so only the percent Claude Code itself measured (the plugin's
+    // per-session cache) is used.
+    const window = kind === "omp" ? catalogWindow(q.windows, model)
+      : kind === "commandcode" ? catalogWindow(q.windows, model ? `commandcode/${model}` : null)
+      : catalogWindow(q.windows, provider ? `anthropic/${model}` : null);
     const context = contextOf({ tokens: entry?.tokens ?? null, window, cachedPct: machine ? null : (q.contexts.get(entry?.sessionId) ?? null) });
     if (!model && !card && !context) return null;
     let note = null;

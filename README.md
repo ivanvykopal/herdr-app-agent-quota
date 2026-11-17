@@ -19,10 +19,11 @@ subscriptions footer below it. The empty space between them is cropped.*
   is waiting for, e.g. `Permission · Run: rm -rf build/ ?` or `Question · Which database?`, in the blocked
   colour. It uses the agent's own status report (OSC 7501 `kind` and `msg`), never the screen, so an agent
   that doesn't send them shows only `Waiting for you`.
-- **Context window per agent:** a `ctx` gauge under each omp and Claude Code agent shows how full its
-  context is (**% used**, plus the token count), for subscription and API models alike. Sizes come from
-  `omp models --json`; for a Claude Code gateway model (not `claude-*`) the percent Claude Code itself
-  measured is used if the plugin recorded it, otherwise only the token count is shown.
+- **Context window per agent:** a `ctx` gauge under each omp, Claude Code and Command Code agent shows how
+  full its context is (**% used**, plus the token count), for subscription and API models alike. Sizes come
+  from `omp models --json` (Command Code models as `commandcode/<id>`); for a Claude Code gateway model (not
+  `claude-*`) the percent Claude Code itself measured is used if the plugin recorded it, otherwise only the
+  token count is shown.
 - **Pinned subscriptions footer** (bottom of the Agents panel), styled after Over9k's usage block: one row
   per subscription (Claude Code, Codex, Command Code) with its fullest limit's **% used** and reset time,
   whether or not an agent is running; subscriptions with a running agent come first. Click a row to open
@@ -49,7 +50,7 @@ subscriptions footer below it. The empty space between them is cropped.*
 | Claude Code, `claude-*` | Anthropic 5h, 7d, Fable (live) |
 | Claude Code, anything else | model name, `no subscription quota` |
 | omp, `anthropic/...` | Anthropic limits (live) |
-| omp, `commandcode/...`; the `commandcode` CLI | Command Code 5h, 7d, credits `Cr` (live) |
+| omp, `commandcode/...`; the `commandcode` CLI (Windows, needs the hook below) | Command Code 5h, 7d, credits `Cr` (live) |
 | omp, `openai-codex/...`; Codex | Codex, from the optional plugin cache (see below) |
 | omp, any other provider | model name, `no subscription quota` |
 | model not known yet, or a folder outside your home | nothing |
@@ -74,6 +75,17 @@ cd herdr-app-agent-quota
 This copies `mods/agents-quota/` to `~/.config/herdr-app/mods/` (or `$HERDR_APP_HOME`) and runs
 `herdr-app check`. Or copy that folder by hand.
 
+On Windows, `install.ps1` also installs the **Command Code status hook**
+(`integrations/commandcode/install.ps1`, which can also be run alone). Command Code doesn't report its status
+to Herdr itself, so without the hook a running `commandcode` is just a shell and never appears under
+Agents. The installer copies `herdr-commandcode-state.ps1` to `~/.commandcode/hooks/` and adds
+`SessionStart`, `PreToolUse`, `PostToolUse` and `Stop` hooks to `~/.commandcode/settings.json`. It keeps
+your other settings, backs the file up as `settings.json.bak`, and replaces its own earlier entries.
+Restart running `commandcode` sessions afterwards. Command Code has no prompt or permission hook, so its
+row shows *working* from the first tool call (not while it only writes text), never shows *blocked*, and
+updates about a second late. The row is removed when Command Code exits. Headless runs (`commandcode -p`)
+are ignored. Not available on macOS / Linux yet.
+
 The mod **replaces the Agents panel**, so a layout has to use it. Herdr's shipped layouts are read-only,
 so clone one and point its agents block at the mod:
 
@@ -97,16 +109,23 @@ Mods are trusted code. This one:
 
 - runs `omp usage --json` once a minute (omp contacts the Anthropic / Command Code usage endpoints
   itself, and caches for ~5 min);
-- runs `powershell` (Windows) or `sh` + `ls` (macOS / Linux) every ~30 s per Claude Code / omp agent to
+- runs `powershell` (Windows) or `sh` + `ls` (macOS / Linux) every ~30 s per Claude Code / omp / Command Code agent to
   find the newest session transcript by file time;
-- reads session transcripts under `~/.omp/agent/sessions/` and `~/.claude/projects/` (only the model name
-  is used), and, if present, the herdr-agent-usage cache under `~/.../herdr/plugins/herdr-agent-usage/`;
+- reads session transcripts under `~/.omp/agent/sessions/`, `~/.claude/projects/` and
+  `~/.commandcode/projects/` (only the model name, title and token counts are used), and, if present, the
+  herdr-agent-usage cache under `~/.../herdr/plugins/herdr-agent-usage/`;
 - for agents on another machine (a Herdr SSH machine), does the same there through the core (`exec` with
   `on`): `sh` to read the home folder, list transcripts with `ls -t` / `stat`, read the first 4 KiB and last
   1 MB of the newest ones with `head` / `tail`, and `omp usage --json` once a minute per machine; nothing is
   copied off the machine except those few lines' worth of model, title and token numbers;
 - makes no network calls of its own and writes no files; it only remembers your footer and status-bar
   choices (open rows, pinned limits, selected subscriptions) in the app's own shared state.
+
+The Command Code hook (Windows) runs `powershell` on each Command Code session start, tool call and turn
+end. Each run lists processes (`Win32_Process`) to find its Command Code process, attaches to that
+console and writes one OSC 7501 status line. It also keeps a hidden `powershell` watcher running for
+each session until Command Code exits. Its only file is a small timestamp in `%TEMP%`
+(`herdr-commandcode-<pid>.last`), which is deleted when the session ends. It makes no network calls.
 
 ## Limits
 
@@ -117,6 +136,10 @@ Mods are trusted code. This one:
   terminal is never assigned. If an agent has no transcript yet (omp writes it on the first message), it
   shows no model rather than a neighbour's. Matching by timing is a best effort when several agents sit
   idle in one folder. Model changes show up within ~40 s.
+- Command Code agents are matched by timing only (Command Code keeps its session title outside the
+  transcript). Headless `commandcode -p` runs in the same folder write transcripts there too, so one that
+  ran within seconds of an idle agent's last turn can show its model and context instead, until that agent's
+  next turn. Command Code agents are read on this computer only.
 - **Remote agents** (omp or Claude Code on another Herdr machine) show their model, context and blocked
   reason like local ones. Their quota is **that machine's own** `omp usage` (its logins), never this
   computer's: if omp isn't installed or logged in there, the row says `quota not read on <machine>`. The

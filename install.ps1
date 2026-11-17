@@ -6,3 +6,4 @@ New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item (Join-Path $PSScriptRoot "mods\agents-quota\*") $dest -Force
 Write-Host "Installed to $dest"
 herdr-app check $dest
+& (Join-Path $PSScriptRoot "integrations\commandcode\install.ps1")
