@@ -1,7 +1,8 @@
 // Quota data for the agents list, drawn as compact rows under an agent: the active model, then its
 // subscription limits. Sources:
 //  - `omp usage --json` (live): Anthropic 5h / 7d / 7d Fable and Command Code 5h / 7d / credits;
-//  - the cache the herdr-agent-usage TUI plugin keeps, for the other providers (e.g. Codex).
+//  - Codex's own rollouts (`~/.codex/sessions`), which carry the plan's limits as of the latest turn;
+//  - the cache the herdr-agent-usage TUI plugin keeps, for the other providers (and Codex, if newer).
 // Limits are shown only when the agent's ACTIVE model is covered by that subscription: Claude Code
 // and omp read the model from their session transcript, so a gateway or API model (glm, kimi, a
 // university cluster, ...) shows its name but no quota.
@@ -14,9 +15,9 @@ import { parseReports } from "./reports.js";
 import { sessionDirFor, newestTranscript, activeModel, ompTitle, providerOfModel } from "./omp-session.js";
 import { claudeProjectDir, lastClaudeModel, claudeProvider, claudeTitle } from "./claude-session.js";
 import { commandcodeProjectDir, lastCommandcodeModel, commandcodeLastTokens } from "./commandcode-session.js";
-import { codexCwd, codexState, sameFolder } from "./codex-session.js";
+import { codexCwd, codexState, codexQuota, codexLiveQuota, sameFolder } from "./codex-session.js";
 import { assignTranscripts } from "./assign.js";
-import { availableSubscriptions, orderSubscriptions } from "./subscriptions.js";
+import { availableSubscriptions, orderSubscriptions, codexCard } from "./subscriptions.js";
 import { ompCost, claudeCost, commandcodeCost, fmtCost } from "./cost.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
 import { blockedReason, reasonText } from "./blocked.js";
@@ -165,7 +166,7 @@ const SPECS = {
   codex: { // Codex records no cost
     root: (_cwd, h, machine) => (machine ? null : `${h.replace(/\\/g, "/")}/.codex/sessions`),
     list: { recursive: true, max: 24 },
-    read: (text) => ({ title: null, cwd: codexCwd(text), ...codexState(tailOf(text)), cost: null, sessionId: null }),
+    read: (text) => ({ title: null, cwd: codexCwd(text), ...codexState(tailOf(text)), quota: codexQuota(tailOf(text)), cost: null, sessionId: null }),
   },
 };
 
@@ -200,6 +201,45 @@ async function readTranscript(spec, root, cand, cache, machine) {
   cache.set(key, info);
   if (cache.size > 80) cache.delete(cache.keys().next().value); // oldest first
   return info;
+}
+
+// Codex's quota now: `codex app-server` asked `account/rateLimits/read` over stdio (Codex contacts its usage
+// endpoint itself, as the herdr-agent-usage plugin's `codex-app-server` source does). `exec` has no stdin, so
+// a small script feeds the three JSON-RPC lines and keeps stdin open until the answer (id 2) is out; closing
+// it then makes the server exit. On Windows `codex` is an npm `.cmd` shim, hence `cmd /c`. ~2 s.
+const CODEX_RPC = [
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"herdr-agents-quota","version":"1"}}}',
+  '{"jsonrpc":"2.0","method":"initialized"}',
+  '{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read"}',
+];
+const CODEX_LIVE_PS = "$p = New-Object System.Diagnostics.Process; $s = $p.StartInfo; $s.FileName = $env:ComSpec; "
+  + "$s.Arguments = '/d /c codex app-server'; $s.UseShellExecute = $false; $s.CreateNoWindow = $true; "
+  + "$s.RedirectStandardInput = $true; $s.RedirectStandardOutput = $true; [void]$p.Start(); "
+  + CODEX_RPC.map((r) => `$p.StandardInput.WriteLine('${r}'); `).join("")
+  + "$p.StandardInput.Flush(); try { while ($null -ne ($l = $p.StandardOutput.ReadLine())) { "
+  + "if ($l.StartsWith('{\"id\":2,')) { $l; break } } } finally { $p.StandardInput.Close(); [void]$p.WaitForExit(5000) }";
+const CODEX_LIVE_SH = 'f=$(mktemp) || exit 1; { printf "%s\\n" "$1" "$2" "$3"; i=0; while [ ! -s "$f" ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; } '
+  + '| codex app-server 2>/dev/null | { grep -m1 "^{\\"id\\":2," > "$f"; cat > /dev/null; }; cat "$f"; rm -f "$f"';
+async function fetchCodexLive() {
+  try { await fs.stat(`${homePath()}/.codex`); } catch { return null; } // Codex never ran here
+  const r = /^[A-Za-z]:/.test(home())
+    ? await exec("powershell", ["-NoProfile", "-Command", CODEX_LIVE_PS], { timeout: 30000 })
+    : await exec("sh", ["-c", CODEX_LIVE_SH, "sh", ...CODEX_RPC], { timeout: 30000 });
+  return r.code === 0 ? codexLiveQuota(r.stdout, Date.now() / 1000) : null;
+}
+
+// Codex's quota as of its last turn, from the newest rollout that has one (this computer only; any folder).
+// The fallback when the app server can't answer. A session signed in with an API key carries none, hence a
+// few rollouts are tried. Files are read through the transcript cache, once per last write.
+const CODEX_QUOTA_SCAN = 8;
+async function fetchCodexRollout(fileCache) {
+  const root = SPECS.codex.root(null, homePath(), null);
+  try { await fs.stat(root); } catch { return null; } // no Codex here: don't start a listing every minute
+  for (const c of await listTranscripts(root, null, { recursive: true, max: CODEX_QUOTA_SCAN })) {
+    const info = await readTranscript(SPECS.codex, root, c, fileCache, null);
+    if (info?.quota) return info.quota;
+  }
+  return null;
 }
 
 // Works out which transcript each agent of one group (same machine, kind and folder) is writing, and reads
@@ -244,7 +284,7 @@ export const modelKind = (agent) => {
   return k === "claude" || k === "claude-code" ? "claude" : null;
 };
 
-// -> { live, liveRemote: Map<machine, { cards, at }>, cache, contexts, used, liveAt, windows, windowsAt,
+// -> { live, liveRemote: Map<machine, { cards, at }>, cache, codex, codexAt, contexts, used, liveAt, windows, windowsAt,
 // fileCache, homes, models: Map<agent address, {model, tokens, pct, cost, sessionId, status, at}> }. `prev` is the last
 // result, so live readings, the model catalog and transcript lookups are reused between asks; `targets` are
 // { kind, cwd, address, status } of the omp / Claude Code / Command Code / Codex agents on screen, on this computer or another
@@ -273,6 +313,16 @@ export async function loadQuota(prev, targets = []) {
   }
   const fileCache = prev?.fileCache ?? new Map();
   const homes = prev?.homes ?? new Map();
+  let codex = prev?.codex ?? null;
+  let codexAt = prev?.codexAt ?? 0;
+  if (Date.now() - codexAt >= LIVE_EVERY_MS) {
+    codexAt = Date.now();
+    let fresh = null;
+    try { fresh = await fetchCodexLive(); } catch { /* codex missing or offline */ }
+    if (!fresh) try { fresh = await fetchCodexRollout(fileCache); } catch { /* unreadable */ }
+    // Keep whichever reading is newer: an old rollout must not replace a live reading that just failed.
+    if (fresh && (!codex || fresh.fetched >= codex.fetched)) codex = fresh;
+  }
   const groups = new Map();
   for (const t of targets) {
     const key = `${machineOf(t.address) ?? ""}\u0000${t.kind}\u0000${t.cwd}`;
@@ -290,7 +340,7 @@ export async function loadQuota(prev, targets = []) {
     const resolved = await resolveGroup(members[0].kind, members[0].cwd, machineOf(members[0].address), members, fileCache, homes);
     for (const m of members) models.set(m.address, { ...resolved.get(m.address), status: m.status, at: Date.now() });
   }
-  return { live, liveRemote, liveAt, windows, windowsAt, fileCache, homes, models, ...(await loadCache()) };
+  return { live, liveRemote, liveAt, codex, codexAt, windows, windowsAt, fileCache, homes, models, ...(await loadCache()) };
 }
 
 // The program key the app reports -> the key the quota sources use.
@@ -315,7 +365,7 @@ export function agentQuota(q, agent) {
     let card = null;
     if (provider === "anthropic") card = live.get("anthropic") ?? cache.get("claude") ?? null;
     else if (provider === "commandcode") card = live.get("commandcode") ?? null;
-    else if (provider === "openai-codex") card = cache.get("codex") ?? null;
+    else if (provider === "openai-codex") card = machine ? null : codexCard(q);
     // Window: omp names models "provider/id", the catalog's keys; Command Code's ids are the catalog's
     // `commandcode/<id>`. Claude Code's `claude-*` ids are Anthropic's; any other model there (a gateway)
     // has no catalog entry we can trust, so only the percent Claude Code itself measured (the plugin's
@@ -329,7 +379,7 @@ export function agentQuota(q, agent) {
     const context = contextOf({ tokens: entry?.tokens ?? null, window, cachedPct });
     if (!model && !card && !context) return null;
     let note = null;
-    // Codex's limits come only from the optional plugin: without it they're unknown, not absent.
+    // Codex's limits are unknown, not absent, when neither its rollouts nor the plugin have them.
     if (!card && kind !== "codex") note = machine && provider ? `quota not read on ${machine}` : "no subscription quota";
     // Session cost: on a subscription provider it's list price for usage the plan covers, so an estimate.
     const cost = fmtCost(entry?.cost ?? null, SUBSCRIPTION_PROVIDERS.has(provider));

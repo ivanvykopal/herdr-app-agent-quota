@@ -91,8 +91,19 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eleven
   first line (`session_meta`) `payload.cwd` is the agent's folder (`sameFolder`: slashes, trailing slash,
   case). `codexState(text)`: model from the last `turn_context` `payload.model`; tokens from the last
   `token_count` `payload.info.last_token_usage.total_tokens`; percent as Codex's footer computes it,
-  `(tokens - 12000) / (model_context_window - 12000)`, passed as the context percent (no catalog). Card:
-  the plugin's `codex` cache (feeds the footer); no `no subscription quota` note without it. Local only.
+  `(tokens - 12000) / (model_context_window - 12000)`, passed as the context percent (no catalog).
+  `codexQuota(text)`: the Codex card `{ provider: "codex", fetched: line timestamp, windows }` from the last
+  `token_count` with `payload.rate_limits` (`limit_id` `codex` or absent; `null` for API-key sessions is
+  skipped); `primary` / `secondary` become rows labelled by `window_minutes` (300 -> `5h`, 10080 -> `7d`,
+  43200 -> `30d`, as the plugin names `monthly`). `codexLiveQuota(stdout, now)`: the same card from
+  `codex app-server`'s JSON-RPC answer id 2 (`account/rateLimits/read`: `rateLimitsByLimitId.codex`, camelCase
+  `usedPercent` / `windowDurationMins` / `resetsAt`), `fetched` = now. `loadQuota` asks the app server once a
+  minute (`exec` has no stdin: Windows runs a PowerShell `Process` with redirected stdin over `cmd /c codex
+  app-server`, Unix a `sh` pipe that holds stdin open until the answer lands in a `mktemp` file); on failure
+  it reads the 8 newest rollouts (through the transcript cache). The newer of the new and the previous
+  reading is kept in `q.codex`. Card (footer and agent rows): `codexCard(q)` in `subscriptions.js`, whichever
+  of `q.codex` and the plugin's `codex` cache has the later `fetched`; no `no subscription quota` note
+  without either. Local only.
 - `cost.js`, over the WHOLE local transcript (remote reads are head + tail, so no cost): `ompCost(text)`
   sums every `"cost":{...,"total":n}` (assistant messages and omp's `model_usage` side requests: title,
   captions); `claudeCost(text)` is the last `{"type":"cost-state"}` record's `totalCostUSD` (null when
@@ -130,8 +141,9 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eleven
   this.quota.used)` inserted after the row (not when collapsed).
 
 Which quota an active model gets: `claude-*` (Claude Code) or `anthropic/*` (omp) -> live Anthropic card;
-`commandcode/*` (omp) or the `commandcode` CLI -> live Command Code card; `openai-codex/*` -> Codex from the
-herdr-agent-usage plugin cache; everything else -> model name + note.
+`commandcode/*` (omp) or the `commandcode` CLI -> live Command Code card; `openai-codex/*` -> Codex, live from
+`codex app-server`, else its rollouts or the herdr-agent-usage plugin cache (newest wins); everything else ->
+model name + note.
 
 Reads and runs (tell the person before installing): `exec("omp", ["usage","--json"])`;
 `exec("powershell", ["-NoProfile","-Command", "(Get-ChildItem -LiteralPath '<dir>' -Filter *.jsonl | Sort-Object

@@ -15,7 +15,10 @@ between them is cropped.*
   live in the footer and status bar, not under each agent; only an agent whose model the mod can't read
   (another program with a subscription) still shows that subscription's limits under its row.
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
-  and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
+  and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance. **Codex** limits are
+  asked of `codex app-server` once a minute (`account/rateLimits/read`, the same call the Codex apps use);
+  if that fails (not signed in to ChatGPT, offline), the limits Codex recorded in its newest session file
+  on its last turn are used. Rows are named by window length (`5h` / `7d`, or `30d` on the free plan).
 - Limit gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
 - **Why an agent is blocked:** under a blocked agent's row (including sub-agents) the mod shows what it
   is waiting for, e.g. `Permission · Run: rm -rf build/ ?` or `Question · Which database?`, in the blocked
@@ -61,8 +64,8 @@ between them is cropped.*
 | Claude Code, anything else | model, `ctx`, `no subscription quota` | nothing |
 | omp, `anthropic/...` | model, `ctx` | Claude Code (live) |
 | omp, `commandcode/...`; the `commandcode` CLI (Windows, needs the hook below) | model, `ctx` | Command Code (5h, 7d, credits `Cr`, live) |
-| omp, `openai-codex/...` | model, `ctx` | Codex, from the optional plugin cache (see below) |
-| Codex | model, `ctx` | Codex, from the optional plugin cache |
+| omp, `openai-codex/...` | model, `ctx` | Codex, from its rollouts or the optional plugin cache (see below) |
+| Codex | model, `ctx` | Codex, from its rollouts or the optional plugin cache |
 | omp, any other provider | model, `ctx`, `no subscription quota` | nothing |
 | model not known yet, or a folder outside your home | nothing | |
 
@@ -71,8 +74,8 @@ between them is cropped.*
 - Herdr desktop app (built against mod API / `agents` mod **v0.1.16**).
 - `omp` on your `PATH` for live Anthropic / Command Code limits. Without it those rows stay empty.
 - Optional: the [herdr-agent-usage](https://github.com/levi-qiao/herdr-agent-usage) plugin, whose cache
-  is the only source for Codex (and other providers it supports). That cache only updates while a Herdr
-  TUI session is running, so those gauges turn gray after 30 minutes.
+  covers other providers. For Codex it's a third source: whichever reading is newest is shown. Gauges turn
+  gray when their reading is over 30 minutes old.
 
 ## Install
 
@@ -120,12 +123,16 @@ Mods are trusted code. This one:
 
 - runs `omp usage --json` once a minute (omp contacts the Anthropic / Command Code usage endpoints
   itself, and caches for ~5 min);
+- if `~/.codex/` exists, runs `codex app-server` once a minute (through `powershell` + `cmd /c` on Windows,
+  `sh` elsewhere, with a temporary file from `mktemp` that it deletes) to ask for the Codex limits; Codex
+  contacts its usage endpoint itself, and the server exits as soon as it has answered;
 - runs `powershell` (Windows) or `sh` + `ls` (macOS / Linux) every ~30 s per Claude Code / omp / Command
-  Code / Codex agent to find the newest session transcripts by file time;
+  Code / Codex agent to find the newest session transcripts by file time, and, when the Codex query
+  fails, to find the newest Codex rollouts;
 - reads session transcripts under `~/.omp/agent/sessions/`, `~/.claude/projects/`,
   `~/.commandcode/projects/` and `~/.codex/sessions/` (the 24 newest uncompressed rollouts; only the folder,
-  model name, title and token counts are used), and, if present, the herdr-agent-usage cache under
-  `~/.../herdr/plugins/herdr-agent-usage/`;
+  model name, title, token counts and Codex's `rate_limits` are used), and, if present, the
+  herdr-agent-usage cache under `~/.../herdr/plugins/herdr-agent-usage/`;
 - for agents on another machine (a Herdr SSH machine), does the same there through the core (`exec` with
   `on`): `sh` to read the home folder, list transcripts with `ls -t` / `stat`, read the first 4 KiB and last
   1 MB of the newest ones with `head` / `tail`, and `omp usage --json` once a minute per machine; nothing is

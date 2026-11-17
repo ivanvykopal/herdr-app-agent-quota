@@ -2,9 +2,10 @@
 //
 // To add a subscription:
 //  1. Live data: add its provider to LABELS in reports.js (limit id -> row label) so `omp usage --json`
-//     reports for it are parsed. Cache-only providers (Codex, ...) need nothing here.
+//     reports for it are parsed. Cache-only providers need nothing here.
 //  2. Add one entry below. `card(q)` returns its quota card or null, where q.live / q.cache are
-//     Maps of provider id -> { provider, fetched, windows }. `providers` lists the card.provider
+//     Maps of provider id -> { provider, fetched, windows } and q.codex is the card from Codex's own
+//     rollouts (or null). `providers` lists the card.provider
 //     values that mean "an agent using this subscription is running" (they rank it first).
 //     `icon` is a file in ~/.config/herdr-app/icons/ (`tint: true` for one-colour glyphs).
 
@@ -15,13 +16,21 @@ export const SUBSCRIPTIONS = [
   },
   {
     id: "codex", name: "Codex", icon: "codex", tint: false, providers: ["codex"],
-    card: (q) => q.cache.get("codex") ?? null,
+    card: (q) => codexCard(q),
   },
   {
     id: "command-code", name: "Command Code", icon: "command-code", tint: true, providers: ["commandcode"],
     card: (q) => q.live.get("commandcode") ?? null,
   },
 ];
+
+// Codex's quota: from its own rollouts (written on every turn) or the herdr-agent-usage cache, whichever
+// was read more recently. Both describe the same plan, with the same window labels.
+export function codexCard(q) {
+  const a = q.codex ?? null, b = q.cache?.get("codex") ?? null;
+  if (!a || !b) return a ?? b;
+  return (b.fetched ?? 0) > (a.fetched ?? 0) ? b : a;
+}
 
 // Subscriptions that have data now, in registry order.
 export function availableSubscriptions(q, registry = SUBSCRIPTIONS) {
