@@ -6,8 +6,8 @@ under the agent in the Agents list.
 
 ![Agents with their model and quota, and the pinned subscriptions footer](preview.png)
 
-*Per-agent model and quota (top: a subscription model with limits, an API model with none). The
-subscriptions footer in this older shot has since been redesigned, see below.*
+*An agent on a subscription model with its context gauge and limits (`ctx`, `5h`, `7d`, `Fable`), and the
+subscriptions footer below it. The empty space between them is cropped.*
 
 - **Follows the active model.** A Claude Code or omp agent running a subscription model shows live
   limits. The same agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...) shows
