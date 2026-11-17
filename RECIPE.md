@@ -1,9 +1,9 @@
 # Agent quota
 
-The Agents list in the Herdr desktop app, with each agent's **active model** and, if that model has a
-subscription, its **quota gauges** right under the agent's row. A Claude Code agent on `claude-sonnet-5-5`
-shows 5h, 7d and Fable weekly limits; an omp agent on `lm-studio/glm-5.3` shows only the model and
-`no subscription quota`.
+The Agents list in the Herdr desktop app, with each agent's **active model** and **context use** right under
+the agent's row, and the subscriptions' limits in a pinned footer (and optionally the status bar). A Claude
+Code agent on `claude-sonnet-5-5` shows its model and `ctx`; an omp agent on `lm-studio/glm-5.3` shows its
+model, `ctx` and `no subscription quota`.
 
 ![Agent quota](preview.png)
 
@@ -20,10 +20,11 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
    a gauge filled to the context window **used** (always used, not remaining, like the agents' own
    footers), percent, and a tail with the token count (`353k`, `1.2M`). Red past 85% used, yellow past
    60%. When only a token count is known (no window), the line reads `<n> tokens` in `muted`.
-3. **One gauge line per limit**, only for subscription models: a 32px label (`5h`, `7d`, `Fable`, `30d`,
-   `Cr`) in 10.5px `dim`; a 3px-tall rounded track (`raised`) filled to the shown percent; a 30px percent
-   in 10.5px `muted`; a 38px tail in 10px `dim` (time to reset like `1h08`, `2d`; for `Cr` the dollars
-   left like `$10.00`).
+3. **One gauge line per limit**, only when the agent's model is NOT known but its program has a
+   subscription (Codex): a 32px label (`5h`, `7d`, `Fable`, `30d`, `Cr`) in 10.5px `dim`; a 3px-tall
+   rounded track (`raised`) filled to the shown percent; a 30px percent in 10.5px `muted`; a 38px tail in
+   10px `dim` (time to reset like `1h08`, `2d`; for `Cr` the dollars left like `$10.00`). An agent with a
+   known model never shows limit lines: the footer and status bar already show them.
 4. Nothing at all when the model isn't known yet or the agent has no folder under the home folder.
 5. **Pinned footer**, below the agent list and above the sidebar footer, hidden in the narrow rail: a 1px
    `border` top line, 16px side padding, 6px vertical, 2px between lines. One 16px line per subscription
@@ -164,18 +165,21 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 ## Done when
 
 - `herdr-app check mods/agents-quota` passes.
-- A Claude Code agent on a `claude-*` model shows its id, then `5h`, `7d`, `Fable` lines whose percents
-  equal `100 - used` from `omp usage --json` (`anthropic:5h`, `anthropic:7d`, `anthropic:7d:fable`).
+- A Claude Code agent on a `claude-*` model shows its id and `ctx`, and no limit lines; the footer's Claude
+  Code row shows `5h`, `7d`, `Fable` whose percents match `omp usage --json` (`anthropic:5h`, `anthropic:7d`,
+  `anthropic:7d:fable`).
 - The same agent on a `glm-*` / `kimi-*` model shows the model and `· no subscription quota`, no gauges.
-- An omp agent on `lm-studio/glm-5.3` shows the same note; on `commandcode/...` it shows `5h`, `7d` and
-  `Cr` with dollars left.
+- An omp agent on `lm-studio/glm-5.3` shows the same note; on `commandcode/...` it shows the model and `ctx`
+  only.
 - With two agents of one kind in one folder (two transcripts, different models), each row shows its own
   model and context, and swapping which transcript was written closest to which agent swaps the rows.
 - An omp agent's `ctx` percent matches its own pane footer within about 0.5% (for example `35%` vs
   `35.3%/1M`), and the token count is the last request's `contextSnapshot.promptTokens`.
 - A `commandcode` agent (with the hook) shows its model as in its transcript (`recursive/flint-v1.0:free`),
   then `ctx` with the last `usage.inputTokens` over the catalog window (25,519 / 262,144 -> `10%  26k`),
-  then `5h`, `7d`, `Cr`.
+  and no limit lines.
+- A Codex agent (model not read) still shows the Codex limit lines under its row; an agent on another
+  machine still shows its machine's limits (nothing else shows them).
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
 - With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /
   cached data, and hovering a line shows the reset times.

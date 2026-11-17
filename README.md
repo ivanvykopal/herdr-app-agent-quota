@@ -1,20 +1,22 @@
 # herdr-app-agent-quota
 
 A [Herdr desktop app](https://github.com/herdrdev/herdr-app) **mod** that shows each agent's active
-model and, when that model has a subscription, its quota (5h / 7d / Fable weekly / credits) directly
-under the agent in the Agents list.
+model and context use directly under the agent in the Agents list, and your subscriptions' quota
+(5h / 7d / Fable weekly / credits) in a pinned footer and, optionally, the status bar.
 
-![Agents with their model and quota, and the pinned subscriptions footer](preview.png)
+![Agents with their model and context, and the pinned subscriptions footer](preview.png)
 
-*An agent on a subscription model with its context gauge and limits (`ctx`, `5h`, `7d`, `Fable`), and the
-subscriptions footer below it. The empty space between them is cropped.*
+*An agent with its model and context gauge (`ctx`), and the subscriptions footer below it. The empty space
+between them is cropped.*
 
-- **Follows the active model.** A Claude Code or omp agent running a subscription model shows live
-  limits. The same agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...) shows
-  the model name and `no subscription quota`, because Anthropic's limits don't apply to it.
+- **Follows the active model.** Under a Claude Code, omp or Command Code agent: its model and how full its
+  context is. An agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...) also says
+  `no subscription quota`, because no subscription's limits apply to it. The limits themselves live in
+  the footer and status bar, not under each agent; only an agent whose model isn't known (Codex, by its
+  program) still shows its subscription's limits under its row.
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
   and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
-- Gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
+- Limit gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
 - **Why an agent is blocked:** under a blocked agent's row (including sub-agents) the mod shows what it
   is waiting for, e.g. `Permission · Run: rm -rf build/ ?` or `Question · Which database?`, in the blocked
   colour. It uses the agent's own status report (OSC 7501 `kind` and `msg`), never the screen, so an agent
@@ -45,15 +47,16 @@ subscriptions footer below it. The empty space between them is cropped.*
   from `omp usage --json`; skip for cache-only providers) and one entry to `SUBSCRIPTIONS` in
   `subscriptions.js` (name, icon, which card to use). It then appears in the footer by itself.
 
-| Active model | Shown |
-|---|---|
-| Claude Code, `claude-*` | Anthropic 5h, 7d, Fable (live) |
-| Claude Code, anything else | model name, `no subscription quota` |
-| omp, `anthropic/...` | Anthropic limits (live) |
-| omp, `commandcode/...`; the `commandcode` CLI (Windows, needs the hook below) | Command Code 5h, 7d, credits `Cr` (live) |
-| omp, `openai-codex/...`; Codex | Codex, from the optional plugin cache (see below) |
-| omp, any other provider | model name, `no subscription quota` |
-| model not known yet, or a folder outside your home | nothing |
+| Active model | Under the agent | Counts toward (footer) |
+|---|---|---|
+| Claude Code, `claude-*` | model, `ctx` | Claude Code (Anthropic 5h, 7d, Fable, live) |
+| Claude Code, anything else | model, `ctx`, `no subscription quota` | nothing |
+| omp, `anthropic/...` | model, `ctx` | Claude Code (live) |
+| omp, `commandcode/...`; the `commandcode` CLI (Windows, needs the hook below) | model, `ctx` | Command Code (5h, 7d, credits `Cr`, live) |
+| omp, `openai-codex/...` | model, `ctx` | Codex, from the optional plugin cache (see below) |
+| Codex | Codex limits (its model isn't read) | Codex |
+| omp, any other provider | model, `ctx`, `no subscription quota` | nothing |
+| model not known yet, or a folder outside your home | nothing | |
 
 ## Requirements
 

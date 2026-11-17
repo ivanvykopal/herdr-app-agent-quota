@@ -309,7 +309,7 @@ export function agentQuota(q, agent) {
     if (!model && !card && !context) return null;
     let note = null;
     if (!card) note = machine && provider ? `quota not read on ${machine}` : "no subscription quota";
-    return { model, card, note, context };
+    return { model, card, note, context, remote: Boolean(machine) };
   }
   if (machine) return null;
   const raw = agent.program?.key ?? agent.app;
@@ -389,7 +389,10 @@ export function quotaBlock(t, info, used) {
   const rows = [];
   if (info.model !== null || info.note) rows.push(modelLine(t, info.model, info.note));
   if (info.context) rows.push(contextLine(t, info.context));
-  const card = info.card;
+  // Limits under an agent only where nothing else shows them: an agent whose model isn't known (Codex, by
+  // its program), or one on another machine (its machine's own logins; the footer and status bar are
+  // this computer's). Otherwise the row keeps to model and context.
+  const card = info.model === null || info.remote ? info.card : null;
   if (card) {
     const stale = card.fetched !== null && now - card.fetched > STALE_S;
     const show = (w) => (used ? w.used : w.remaining);
