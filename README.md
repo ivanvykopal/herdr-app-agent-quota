@@ -93,9 +93,9 @@ Agents. The installer copies `herdr-commandcode-state.ps1` to `~/.commandcode/ho
 `SessionStart`, `PreToolUse`, `PostToolUse` and `Stop` hooks to `~/.commandcode/settings.json`. It keeps
 your other settings, backs the file up as `settings.json.bak`, and replaces its own earlier entries.
 Restart running `commandcode` sessions afterwards. Command Code has no prompt or permission hook, so its
-row shows *working* from the first tool call (not while it only writes text), never shows *blocked*, and
-updates about a second late. The row is removed when Command Code exits. Headless runs (`commandcode -p`)
-are ignored. Not available on macOS / Linux yet.
+row shows *working* from the first tool call (not while it only writes text) and never shows *blocked*.
+Status changes show up within a few milliseconds. The row is removed when Command Code exits. Headless runs
+(`commandcode -p`) are ignored. Not available on macOS / Linux yet.
 
 The mod **replaces the Agents panel**, so a layout has to use it. Herdr's shipped layouts are read-only,
 so clone one and point its agents block at the mod:
@@ -133,11 +133,12 @@ Mods are trusted code. This one:
 - makes no network calls of its own and writes no files; it only remembers your footer and status-bar
   choices (open rows, pinned limits, selected subscriptions) in the app's own shared state.
 
-The Command Code hook (Windows) runs `powershell` on each Command Code session start, tool call and turn
-end. Each run lists processes (`Win32_Process`) to find its Command Code process, attaches to that
-console and writes one OSC 7501 status line. It also keeps a hidden `powershell` watcher running for
-each session until Command Code exits. Its only file is a small timestamp in `%TEMP%`
-(`herdr-commandcode-<pid>.last`), which is deleted when the session ends. It makes no network calls.
+The Command Code hook (Windows) runs `powershell` once per Command Code session: it lists processes
+(`Win32_Process`) to find the Command Code process and starts a hidden `powershell` watcher that stays
+attached to that console until Command Code exits, writing one OSC 7501 status line per change. Tool calls
+and turn ends run a one-line `cmd` command that writes the new state to
+`%TEMP%\herdr-commandcode-<terminal>.state`; the watcher keeps its pid in `...<terminal>.watch`. Both files are
+deleted when the session ends. It makes no network calls.
 
 ## Limits
 

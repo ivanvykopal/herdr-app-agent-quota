@@ -167,15 +167,19 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - `herdr-app check` really runs `omp usage` (a warning says so).
 - Dash-prefixed folder names (`-Desktop-...`) need `./` or `--` in shell commands when debugging.
 - Command Code never sends OSC 7501, so Herdr doesn't list it as an agent without
-  `integrations/commandcode/` (Windows). Its hooks (`~/.commandcode/settings.json`: `SessionStart` -> idle,
-  `PreToolUse`/`PostToolUse` -> working, `Stop` -> idle, all `async`) run with piped stdio and
-  `windowsHide`, so their output never reaches the terminal: the hook `AttachConsole`s to the nearest
-  `node.exe` ancestor and writes to `CONOUT$` (`CreateFileW`; .NET's `File.Open("CONOUT$")` makes a file).
-  It reports `app=command-code`, Herdr's program key (icon; `ALIAS` maps it to the quota card); `commandcode`
-  matches nothing and shows a generic icon with no quota. A hidden watcher started on `SessionStart` sends
-  `state=clear` when Command Code exits. Headless runs (`-p`/`--print`) are ignored, because they may share
-  another agent's terminal. There is no prompt or permission hook: working starts at the first tool call,
-  and blocked is never shown.
+  `integrations/commandcode/` (Windows). Its hooks (`~/.commandcode/settings.json`, all `async`) run with
+  piped stdio and `windowsHide`, so their output never reaches the terminal. Design: `SessionStart` runs
+  PowerShell once: it finds the nearest `node.exe` ancestor (Command Code), skips headless runs
+  (`-p`/`--print`, which may share another agent's terminal) and starts a hidden watcher. The watcher
+  `AttachConsole`s to Command Code and writes to `CONOUT$` (`CreateFileW`; .NET's `File.Open("CONOUT$")`
+  makes a file): `state=idle` at start, then each change of `%TEMP%\herdr-commandcode-<HC_TERMINAL_ID>.state`
+  (`FileSystemWatcher`, plus a read every 500 ms), and `state=clear` when Command Code exits, removing its
+  files only if `.watch` still holds its pid (a new session in the terminal may have its own).
+  `PreToolUse`/`PostToolUse`/`Stop` are cmd one-liners, `if exist "...\.watch" (echo working)>"...\.state"`:
+  ~10 ms from hook to status, where a PowerShell hook per event took ~1.2 s (startup, `Add-Type` compile,
+  `Win32_Process` listing). It reports `app=command-code`, Herdr's program key (icon; `ALIAS` maps it to
+  the quota card); `commandcode` matches nothing and shows a generic icon with no quota. There is no prompt
+  or permission hook: working starts at the first tool call, and blocked is never shown.
 
 ## Done when
 

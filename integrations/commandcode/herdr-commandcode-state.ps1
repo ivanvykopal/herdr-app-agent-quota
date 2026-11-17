@@ -1,18 +1,47 @@
-# Command Code hook: reports the agent's status to Herdr (OSC 7501), so a `commandcode` session shows
-# up in the Agents list. Installed by integrations/commandcode/install.ps1 into ~/.commandcode/hooks/.
+# Command Code -> Herdr status (OSC 7501), so a `commandcode` session shows up in the Agents list.
+# Installed by integrations/commandcode/install.ps1 into ~/.commandcode/hooks/.
 #
-# Usage (from ~/.commandcode/settings.json): powershell -NoProfile -ExecutionPolicy Bypass -File <this> <event>
-#   session  SessionStart              -> idle, and a hidden watcher that clears the status when Command Code exits
-#   working  PreToolUse / PostToolUse  -> working
-#   idle     Stop                      -> idle (herdr-core makes it done if you weren't looking)
+# Command Code runs hooks with piped stdio and windowsHide, so a hook has its own hidden console and its
+# output never reaches the terminal. One watcher per session therefore attaches to the console of the
+# Command Code process and writes the OSC sequences there. Hooks only tell it the new state:
 #
-# Command Code runs hooks with piped stdio and windowsHide, so the hook has its own hidden console and
-# its output never reaches the terminal. The hook therefore attaches to the console of the Command Code
-# process (the nearest node.exe ancestor) and writes the OSC sequence there.
+#   SessionStart  powershell -File <this> session   finds Command Code (the nearest node.exe above it),
+#                                                   skips headless runs, starts the watcher (once, ~0.7 s)
+#   PreToolUse, PostToolUse, Stop                   a one-line cmd command (~50 ms, no PowerShell) that
+#                                                   writes `working` / `idle` to the state file, but only
+#                                                   while this terminal has a watcher (its .watch file)
+#
+# Files, in %TEMP%, per herdr-core terminal (HC_TERMINAL_ID):
+#   herdr-commandcode-<terminal>.watch  the watcher's Command Code pid; exists while it runs
+#   herdr-commandcode-<terminal>.state  the latest state a hook wrote
+# The watcher reports idle at start, each state change within ~50 ms, and `state=clear` when Command
+# Code exits (so the shell left in the terminal is no longer an agent), then removes both files.
 
-param([string]$Event = "", [int]$WatchPid = 0)
+param([string]$Event = "", [int]$WatchPid = 0, [string]$Terminal = "")
 
-if ([string]::IsNullOrWhiteSpace($env:HC_TERMINAL_ID)) { exit 0 } # not in a herdr-core terminal
+if (-not $Terminal) { $Terminal = $env:HC_TERMINAL_ID }
+if ([string]::IsNullOrWhiteSpace($Terminal)) { exit 0 } # not in a herdr-core terminal
+
+if ($Event -eq "session") {
+    # The Command Code process: the nearest node.exe above this hook (the hook runs under cmd.exe).
+    $procs = @{}
+    foreach ($p in Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine) { $procs[[int]$p.ProcessId] = $p }
+    $target = 0
+    $at = $procs[$PID]
+    for ($i = 0; $at -and $i -lt 10; $i++) {
+        $at = $procs[[int]$at.ParentProcessId]
+        if ($at -and $at.Name -eq "node.exe") { $target = [int]$at.ProcessId; break }
+    }
+    if (-not $target) { exit 0 }
+    # A headless run (`-p` / `--print`, e.g. started by another agent in its own terminal) is not the
+    # terminal's agent: reporting it would overwrite that agent's status.
+    if (@("$($procs[$target].CommandLine)" -split '\s+' | Where-Object { $_ -in @("-p", "--print") }).Count) { exit 0 }
+    Start-Process powershell -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "watch", "$target", "$Terminal")
+    exit 0
+}
+
+if ($Event -ne "watch") { exit 0 }
 
 Add-Type -Namespace HerdrCommandCode -Name Console -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern bool FreeConsole();
@@ -21,11 +50,6 @@ Add-Type -Namespace HerdrCommandCode -Name Console -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern bool WriteFile(IntPtr h, byte[] buffer, int count, out int written, IntPtr overlapped);
 [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
 '@
-
-function Attach([int]$ProcessId) {
-    [HerdrCommandCode.Console]::FreeConsole() | Out-Null
-    return [HerdrCommandCode.Console]::AttachConsole($ProcessId)
-}
 
 # Writes to the attached console's screen: herdr-core reads the OSC from the terminal output.
 function Report([string]$Record) {
@@ -37,47 +61,40 @@ function Report([string]$Record) {
     [HerdrCommandCode.Console]::CloseHandle($h) | Out-Null
 }
 
-# The watcher: holds Command Code's console, and when Command Code exits, clears the status so the
-# shell left in the terminal is no longer listed as an agent.
-if ($Event -eq "watch") {
-    if (-not (Attach $WatchPid)) { exit 0 }
-    Wait-Process -Id $WatchPid -ErrorAction SilentlyContinue
-    Report "state=clear"
-    Remove-Item -LiteralPath (Join-Path $env:TEMP "herdr-commandcode-$WatchPid.last") -ErrorAction SilentlyContinue
-    exit 0
-}
+$proc = Get-Process -Id $WatchPid -ErrorAction SilentlyContinue
+if (-not $proc) { exit 0 }
+[HerdrCommandCode.Console]::FreeConsole() | Out-Null
+if (-not [HerdrCommandCode.Console]::AttachConsole($WatchPid)) { exit 0 }
 
-$state = @{ session = "idle"; working = "working"; idle = "idle" }[$Event]
-if (-not $state) { exit 0 }
+$name = "herdr-commandcode-$Terminal"
+$watchFile = Join-Path $env:TEMP "$name.watch"
+$stateFile = Join-Path $env:TEMP "$name.state"
+[IO.File]::WriteAllText($stateFile, "idle")
+[IO.File]::WriteAllText($watchFile, "$WatchPid")
 
-# When this event happened: hooks run async and take about a second each, so they can finish out of
-# order, and only the newest one reports (a Stop's idle must not be overwritten by an earlier working).
-$stamp = [DateTime]::UtcNow.Ticks
-
-# The Command Code process: the nearest node.exe above this hook (the hook runs under cmd.exe).
-$procs = @{}
-foreach ($p in Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine) { $procs[[int]$p.ProcessId] = $p }
-$target = 0
-$at = $procs[$PID]
-for ($i = 0; $at -and $i -lt 10; $i++) {
-    $at = $procs[[int]$at.ParentProcessId]
-    if ($at -and $at.Name -eq "node.exe") { $target = [int]$at.ProcessId; break }
-}
-if (-not $target) { exit 0 }
-# A headless run (`-p` / `--print`, e.g. started by another agent in its own terminal) is not the
-# terminal's agent: reporting it would overwrite that agent's status.
-if (@("$($procs[$target].CommandLine)" -split '\s+' | Where-Object { $_ -in @("-p", "--print") }).Count) { exit 0 }
-
-$stampFile = Join-Path $env:TEMP "herdr-commandcode-$target.last"
-try { if ([long][IO.File]::ReadAllText($stampFile) -gt $stamp) { exit 0 } } catch { }
-[IO.File]::WriteAllText($stampFile, [string]$stamp)
-
-if ($Event -eq "session") {
-    Start-Process powershell -WindowStyle Hidden -ArgumentList @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "watch", "$target")
-}
-
-if (-not (Attach $target)) { exit 0 }
-try { if ([IO.File]::ReadAllText($stampFile) -ne $stamp) { exit 0 } } catch { }
 # app: Herdr's program key for Command Code (its icon; the mod maps it to the Command Code quota).
-Report "state=$($state):app=command-code"
+$last = "idle"
+Report "state=idle:app=command-code"
+
+$fsw = New-Object IO.FileSystemWatcher $env:TEMP, "$name.state"
+$fsw.NotifyFilter = [IO.NotifyFilters]'LastWrite, FileName, Size'
+while (-not $proc.HasExited) {
+    # Wakes on a write, else every 500 ms (a missed event is caught by reading the file anyway).
+    $fsw.WaitForChanged([IO.WatcherChangeTypes]'Created, Changed', 500) | Out-Null
+    $state = $null
+    for ($try = 0; $try -lt 3 -and $null -eq $state; $try++) {
+        try { $state = [IO.File]::ReadAllText($stateFile).Trim() } catch { Start-Sleep -Milliseconds 20 }
+    }
+    if ($state -in @("working", "idle") -and $state -ne $last) {
+        Report "state=$($state):app=command-code"
+        $last = $state
+    }
+}
+
+Report "state=clear"
+# A new session in this terminal may already have its own watcher: only remove files that are still ours.
+try {
+    if ([IO.File]::ReadAllText($watchFile).Trim() -eq "$WatchPid") {
+        Remove-Item -LiteralPath $watchFile, $stateFile -ErrorAction SilentlyContinue
+    }
+} catch { }
