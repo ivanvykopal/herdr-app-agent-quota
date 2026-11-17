@@ -566,9 +566,9 @@ export function summaryFooter(t, q, ui) {
       .children(shown.map((s, i) => subscriptionRow(t, s, i, ui, now))));
 }
 
-// Status bar strip: per selected subscription its icon and one pill per limit, "5h 86%  7d 81%  Fbl 78%",
-// as % REMAINING (red under 15%, yellow under 40%). Hover for reset times. Returns null when nothing is
-// selected or has data. `items` come from availableSubscriptions + pickSubscriptions.
+// Status bar strip: per selected subscription its icon and one pill per limit, "5h 86% 1h12  7d 81% 3d",
+// as % REMAINING (red under 15%, yellow under 40%) and the time to its reset, dimmed. Hover for the full
+// reset list. Returns null when nothing is selected or has data. `items` come from availableSubscriptions + pickSubscriptions.
 const SHORT = { Fable: "Fbl" };
 
 function pill(t, w, now, stale) {
@@ -578,11 +578,13 @@ function pill(t, w, now, stale) {
   else if (w.remaining < 15) color = t.ansi1;
   else if (w.remaining < 40) color = t.ansi3;
   let text = `${Math.round(w.remaining)}%`;
-  if (w.label === "Cr" && w.tail) text = w.tail; // credits: the money left says more than a percent
+  const credits = w.label === "Cr";
+  if (credits && w.tail) text = w.tail; // credits: the money left says more than a percent
   if (expired) text = "n/a";
   return h_flex().flex_none().items_center().gap(3)
     .child(div().text_size(10).text_color(t.dim).child(SHORT[w.label] ?? w.label))
-    .child(div().text_size(10.5).font_semibold().text_color(color).child(text));
+    .child(div().text_size(10.5).font_semibold().text_color(color).child(text))
+    .when(!credits && !expired && w.resets !== null, (el) => el.child(div().text_size(10).text_color(t.dim).child(until(w.resets))));
 }
 
 export function statusStrip(t, items) {

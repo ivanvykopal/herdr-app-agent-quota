@@ -47,9 +47,10 @@ between them is cropped.*
   ![Pinned subscriptions footer](screenshots/footer.png)
 
 - **Status bar summary** (optional, bottom of the window): next to *This computer*, the branch and the
-  agent count, a compact strip with each selected subscription's icon and its limits as **% remaining**
-  (`5h 96%  7d 80%  Fbl 78%`, credits as `Cr $10.00`). Red under 15% left, yellow under 40%, `n/a` once a
-  window has reset. Hover for reset times. Click the strip to choose which subscriptions are shown (all
+  agent count, a compact strip with each selected subscription's icon and its limits as **% remaining**,
+  each followed by the time to its reset (`5h 96% 1h12  7d 80% 3d  Fbl 78% 3d`, credits as `Cr $10.00`).
+  Red under 15% left, yellow under 40%, `n/a` once a window has reset. Hover for the full list of reset
+  times. Click the strip to choose which subscriptions are shown (all
   by default). It is independent of the Agents panel footer.
 
   ![Status bar with subscription limits](screenshots/status-bar.png)

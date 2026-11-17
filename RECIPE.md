@@ -33,9 +33,10 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
    `border` top line, 16px side padding, 6px vertical, 2px between lines. One 16px line per subscription
    that has data: a 12px provider icon (single-colour glyphs tinted `muted`), then `label value` pills 8px
    apart, label 10px `dim`, value 10.5px semibold coloured like the gauges (`dim` when the reading is older
-   than 30 min or reset). Claude Code: `5h 87%  7d 80%  Fbl 78%` (Fable shortened to `Fbl`); Codex:
-   `30d 40%`; Command Code: `5h 100%  7d 100%  Cr $10.00` (credits show the dollars left, not a percent).
-   Hover shows a tooltip with the provider name and reset times. Subscriptions with a running agent are
+   than 30 min or reset), then the time to the limit's reset in 10px `dim` (`1h12`, `29m`, `3d`; none for
+   credits or a reset window). Claude Code: `5h 87% 1h12  7d 80% 3d  Fbl 78% 3d` (Fable shortened to `Fbl`);
+   Codex: `30d 40% 12d`; Command Code: `5h 100% 4h05  7d 100% 6d  Cr $10.00` (credits show the dollars left,
+   not a percent). Hover shows a tooltip with the provider name and reset times. Subscriptions with a running agent are
    listed first. With more than 3, only 3 show plus a 14px `> +N more` row (10px `dim`, chevron);
    clicking it opens the list in place, growing to show every row with no scrolling and no clipping, and
    the row becomes `v less`.
