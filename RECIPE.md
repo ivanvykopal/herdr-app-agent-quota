@@ -15,7 +15,9 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
 
 1. **Model line**, always when a model is known: the model id (`anthropic/claude-sonnet-5-5`,
    `lm-studio/glm-5.3`) in 10.5px `muted`, truncated; for a model with no subscription, a second piece
-   `· no subscription quota` in 10px `dim`.
+   `· no subscription quota` in 10px `dim`; at the right (after a flexible gap), the session cost in 10.5px
+   `muted`: `$1.23`, `$123`, `<$0.01`, prefixed `≈` on a subscription provider (`anthropic`, `commandcode`,
+   `openai-codex`: list price for usage the plan may cover). No cost when it's $0 or unknown.
 2. **Context line**, for any model with a known size of last request (subscription or not): label `ctx`,
    a gauge filled to the context window **used** (always used, not remaining, like the agents' own
    footers), percent, and a tail with the token count (`353k`, `1.2M`). Red past 85% used, yellow past
@@ -61,7 +63,7 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus ten modules:
+version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eleven modules:
 
 - `quota.js`: `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp / Claude Code / Command Code
   agent) returns `{ live, cache, contexts, used, liveAt, windows, windowsAt, fileCache, models }` (`models`
@@ -91,6 +93,10 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus ten mo
   `token_count` `payload.info.last_token_usage.total_tokens`; percent as Codex's footer computes it,
   `(tokens - 12000) / (model_context_window - 12000)`, passed as the context percent (no catalog). Card:
   the plugin's `codex` cache (feeds the footer); no `no subscription quota` note without it. Local only.
+- `cost.js`, over the WHOLE local transcript (remote reads are head + tail, so no cost): `ompCost(text)`
+  sums every `"cost":{...,"total":n}` (assistant messages and omp's `model_usage` side requests: title,
+  captions); `claudeCost(text)` is the last `{"type":"cost-state"}` record's `totalCostUSD` (null when
+  `hasUnknownModelCost`); `commandcodeCost(text)` sums `"costUsd"`; `fmtCost(n, estimate)`. Codex: none.
 - `context.js`: `ompLastTokens(text)` (assistant `contextSnapshot.promptTokens`, else usage totals),
   `claudeLastTokens(text)` (last assistant `usage`: input + cache read + cache creation tokens),
   `parseModelCatalog(json)` (`provider/id` -> `contextWindow`), `catalogWindow(map, model)` (also tries
@@ -190,6 +196,8 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - A Codex agent shows its model (`gpt-5.6-terra`) and a `ctx` percent equal to its own footer's
   `Context N% used` (22,502 tokens of 258,400 -> `4%  22k`), and no limit lines. An agent on another
   machine still shows its machine's limits (nothing else shows them).
+- This omp session's cost equals the sum of every `usage.cost.total` in its file (`message` and
+  `model_usage` records alike), shown `≈$…`; an `lm-studio/...` agent ($0) shows no cost.
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
 - With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /
   cached data, and hovering a line shows the reset times.

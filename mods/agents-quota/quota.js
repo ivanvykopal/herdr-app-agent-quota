@@ -17,6 +17,7 @@ import { commandcodeProjectDir, lastCommandcodeModel, commandcodeLastTokens } fr
 import { codexCwd, codexState, sameFolder } from "./codex-session.js";
 import { assignTranscripts } from "./assign.js";
 import { availableSubscriptions, orderSubscriptions } from "./subscriptions.js";
+import { ompCost, claudeCost, commandcodeCost, fmtCost } from "./cost.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
 import { blockedReason, reasonText } from "./blocked.js";
 
@@ -141,15 +142,17 @@ async function homeOf(machine, homes) {
 // async) and how to read one. Command Code's folder needs a directory listing, so it is found on this
 // computer only (the status hook that lists it as an agent is Windows-only). Codex files sit by date, not
 // by folder: `list` searches all of them and `cwd` (from each file) keeps those of the agent's folder.
+// `whole`: the text is the whole file (local), so the session cost can be summed; a remote read is only
+// its head and tail, and gets no cost rather than part of one.
 const tailOf = (text) => text.slice(-TAIL_CHARS);
 const SPECS = {
   omp: {
     root: (cwd, h) => { const d = sessionDirFor(h, cwd); return d ? `${h.replace(/\\/g, "/")}/.omp/agent/sessions/${d}` : null; },
-    read: (text) => ({ title: ompTitle(text.slice(0, 4096)), model: activeModel(tailOf(text)), tokens: ompLastTokens(tailOf(text)), sessionId: null }),
+    read: (text, _file, whole) => ({ title: ompTitle(text.slice(0, 4096)), model: activeModel(tailOf(text)), tokens: ompLastTokens(tailOf(text)), cost: whole ? ompCost(text) : null, sessionId: null }),
   },
   claude: {
     root: (cwd, h) => claudeProjectDir(h, cwd),
-    read: (text, file) => ({ title: claudeTitle(tailOf(text)), model: lastClaudeModel(tailOf(text)), tokens: claudeLastTokens(tailOf(text)), sessionId: file.replace(/\.jsonl$/, "") }),
+    read: (text, file, whole) => ({ title: claudeTitle(tailOf(text)), model: lastClaudeModel(tailOf(text)), tokens: claudeLastTokens(tailOf(text)), cost: whole ? claudeCost(text) : null, sessionId: file.replace(/\.jsonl$/, "") }),
   },
   commandcode: {
     root: async (cwd, h, machine) => {
@@ -157,12 +160,12 @@ const SPECS = {
       const base = `${h.replace(/\\/g, "/")}/.commandcode/projects`;
       try { const d = commandcodeProjectDir(await fs.readdir(base), cwd); return d ? `${base}/${d}` : null; } catch { return null; }
     },
-    read: (text) => ({ title: null, model: lastCommandcodeModel(tailOf(text)), tokens: commandcodeLastTokens(tailOf(text)), sessionId: null }),
+    read: (text) => ({ title: null, model: lastCommandcodeModel(tailOf(text)), tokens: commandcodeLastTokens(tailOf(text)), cost: commandcodeCost(text), sessionId: null }),
   },
-  codex: {
+  codex: { // Codex records no cost
     root: (_cwd, h, machine) => (machine ? null : `${h.replace(/\\/g, "/")}/.codex/sessions`),
     list: { recursive: true, max: 24 },
-    read: (text) => ({ title: null, cwd: codexCwd(text), ...codexState(tailOf(text)), sessionId: null }),
+    read: (text) => ({ title: null, cwd: codexCwd(text), ...codexState(tailOf(text)), cost: null, sessionId: null }),
   },
 };
 
@@ -185,14 +188,14 @@ async function readRemote(path, machine) {
   return r.stdout;
 }
 
-// A transcript's facts, read once per (machine, file, last write): { title, model, tokens, sessionId } or null.
+// A transcript's facts, read once per (machine, file, last write): { title, model, tokens, cost, sessionId } or null.
 async function readTranscript(spec, root, cand, cache, machine) {
   const key = `${machine ?? ""}|${root}/${cand.file}|${cand.mtimeMs}`;
   if (cache.has(key)) return cache.get(key);
   let info = null;
   try {
     const path = `${root}/${cand.file}`;
-    info = spec.read(machine ? await readRemote(path, machine) : await fs.readFile(path, "utf8"), cand.file);
+    info = spec.read(machine ? await readRemote(path, machine) : await fs.readFile(path, "utf8"), cand.file, !machine);
   } catch { /* unreadable: no info */ }
   cache.set(key, info);
   if (cache.size > 80) cache.delete(cache.keys().next().value); // oldest first
@@ -203,7 +206,7 @@ async function readTranscript(spec, root, cand, cache, machine) {
 // its model and context. -> Map(address -> { model, tokens, pct, sessionId }). Agents with no transcript
 // of their own get nothing rather than another agent's.
 async function resolveGroup(kind, cwd, machine, members, cache, homes) {
-  const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, pct: null, sessionId: null }]));
+  const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, pct: null, cost: null, sessionId: null }]));
   const spec = SPECS[kind];
   const h = await homeOf(machine, homes);
   const root = h ? await spec.root(cwd, h, machine) : null;
@@ -227,7 +230,7 @@ async function resolveGroup(kind, cwd, machine, members, cache, homes) {
   for (const m of members) {
     const c = assigned.get(m.address);
     const info = c ? infos.get(c.file) : null;
-    if (info) out.set(m.address, { model: info.model, tokens: info.tokens, pct: info.pct ?? null, sessionId: info.sessionId });
+    if (info) out.set(m.address, { model: info.model, tokens: info.tokens, pct: info.pct ?? null, cost: info.cost ?? null, sessionId: info.sessionId });
   }
   return out;
 }
@@ -242,7 +245,7 @@ export const modelKind = (agent) => {
 };
 
 // -> { live, liveRemote: Map<machine, { cards, at }>, cache, contexts, used, liveAt, windows, windowsAt,
-// fileCache, homes, models: Map<agent address, {model, tokens, sessionId, status, at}> }. `prev` is the last
+// fileCache, homes, models: Map<agent address, {model, tokens, pct, cost, sessionId, status, at}> }. `prev` is the last
 // result, so live readings, the model catalog and transcript lookups are reused between asks; `targets` are
 // { kind, cwd, address, status } of the omp / Claude Code / Command Code / Codex agents on screen, on this computer or another
 // machine (address `machine/t7`). Agents sharing a folder are told apart (see assign.js).
@@ -328,7 +331,9 @@ export function agentQuota(q, agent) {
     let note = null;
     // Codex's limits come only from the optional plugin: without it they're unknown, not absent.
     if (!card && kind !== "codex") note = machine && provider ? `quota not read on ${machine}` : "no subscription quota";
-    return { model, card, note, context, limits: Boolean(machine) };
+    // Session cost: on a subscription provider it's list price for usage the plan covers, so an estimate.
+    const cost = fmtCost(entry?.cost ?? null, SUBSCRIPTION_PROVIDERS.has(provider));
+    return { model, card, note, context, cost, limits: Boolean(machine) };
   }
   if (machine) return null;
   const raw = agent.program?.key ?? agent.app;
@@ -374,10 +379,15 @@ function expiredLine(t, name) {
     .child(div().w(38).text_size(10).text_color(t.dim).child("reset"));
 }
 
-function modelLine(t, model, note) {
+// Providers a subscription can cover: an agent's cost on them is shown as an estimate ("≈$8.90").
+const SUBSCRIPTION_PROVIDERS = new Set(["anthropic", "commandcode", "openai-codex"]);
+
+// "anthropic/claude-opus-5-5 · no subscription quota          ≈$8.90": the session cost sits at the right.
+function modelLine(t, model, note, cost) {
   return h_flex().h(15).flex_none().items_center().gap(6)
     .child(div().min_w(0).truncate().text_size(10.5).text_color(t.muted).child(model ?? "model unknown"))
-    .when(Boolean(note), (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(`· ${note}`)));
+    .when(Boolean(note), (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(`· ${note}`)))
+    .when(Boolean(cost), (e) => e.child(div().flex_1()).child(div().flex_none().text_size(10.5).text_color(t.muted).child(cost)));
 }
 
 // How full the context window is: "ctx  ▬▬▬▬  34%  336k". Always % USED (as agents' own footers show it),
@@ -406,7 +416,7 @@ export function quotaBlock(t, info, used) {
   if (!info) return null;
   const now = Date.now() / 1000;
   const rows = [];
-  if (info.model !== null || info.note) rows.push(modelLine(t, info.model, info.note));
+  if (info.model !== null || info.note) rows.push(modelLine(t, info.model, info.note, info.cost));
   if (info.context) rows.push(contextLine(t, info.context));
   // Limits under an agent only where nothing else shows them (`limits`): an agent whose model the mod can't
   // read (a program without a transcript reader), or one on another machine (its machine's own logins; the

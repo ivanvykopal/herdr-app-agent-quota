@@ -27,6 +27,13 @@ between them is cropped.*
   window, and its percent is worked out as Codex's footer does (`Context N% used`, leaving out a 12k-token
   baseline). For a Claude Code gateway model (not `claude-*`) the percent Claude Code itself measured is
   used if the plugin recorded it, otherwise only the token count is shown.
+- **Session cost per agent**, at the right of the model line: what the agent's session has cost so far.
+  omp sums each request's cost, including its own side requests (session title, captions); Claude Code's
+  own running total is used; Command Code sums what it charges. On a model a subscription can cover
+  (Anthropic, Command Code, Codex) it's marked as an estimate, `≈$9.79`, because omp and Claude Code price
+  every request at API list prices even when your plan pays for it. A free or local model ($0) shows
+  nothing, and so does Codex, which records no cost. Agents on another machine show no cost (only part of
+  their transcript is read).
 - **Pinned subscriptions footer** (bottom of the Agents panel), styled after Over9k's usage block: one row
   per subscription (Claude Code, Codex, Command Code) with its fullest limit's **% used** and reset time,
   whether or not an agent is running; subscriptions with a running agent come first. Click a row to open
