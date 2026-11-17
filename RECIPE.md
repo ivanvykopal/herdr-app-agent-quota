@@ -64,18 +64,32 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eleven modules:
+version 0.1.16, kept unmodified in `upstream/agents/` as the merge base) with `mod.json`
+`{"place":"none","title":"Agents"}`. `main.js` stays upstream's file plus seven one-line hooks into this
+mod's modules, so `sync-upstream.sh` can three-way merge a newer shipped `agents` (`git merge-file`; base
+`upstream/agents/main.js`, CRs stripped, the clone's own name in `openOverlay` set back to `agents-quota`)
+and then advance the base and `mod.json` `cloned_from.version`. Don't restyle upstream lines in `main.js`
+(lint fixes included): every changed line is a future conflict. The modules:
 
-- `quota.js`: `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp / Claude Code / Command Code
-  agent) returns `{ live, cache, contexts, used, liveAt, windows, windowsAt, fileCache, models }` (`models`
-  is keyed by agent address, entries `{ model, tokens, sessionId, status, at }`); `agentQuota(q, agent)`
-  returns `{ model, card, note, context, limits }` or null (`limits`: draw the card's lines under the row);
-  `quotaBlock(t, info, used)` draws it; `modelKind(agent)`
-  is `"omp"`, `"claude"`, `"commandcode"` (program key `command-code`), `"codex"` or null. Per folder group it lists
-  the newest 8 transcripts (`*.checkpoints.jsonl` excluded) with their write times
-  (`powershell Get-ChildItem` on Windows, `ls -t` + `stat` elsewhere), reads each once per (file, mtime),
-  asks `hc get --json <address>` for the agent's `created_ms`, `status_ms` and title, then calls
-  `assignTranscripts`. The model catalog comes from `omp models --json` every 10 min.
+- `panel.js`: what the mod adds to the view. `initQuota(view, cx)` (in `init`): `view.quota`, footer state,
+  a 10 s `cx.timer.every` that builds `targets` from `agents()` and `panes()` (cwd by `a.pane`) and loads
+  through one module-level loader (`sharedLoad`), so the Agents panel and the status bar block, two views of
+  this mod, don't each run `omp usage`, `codex app-server` and the listing; `reportsOf(all)`;
+  `quotaFooter(view, t, list)`; `statusMenu(t)` and `statusBar(view, t)` for the `statusMenu` / `status` props.
+- `view.js`: drawing only. `quotaBlock(t, info, used)`, `blockedRow`, `summaryFooter`, `statusStrip`.
+- `quota.js`: data only. `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp /
+  Claude Code / Command Code / Codex agent) returns `{ live, cache, contexts, used, liveAt, windows,
+  windowsAt, codex, codexAt, fileCache, homes, models }` (`models` is keyed by agent address, entries
+  `{ model, tokens, sessionId, status, at }`); `agentQuota(q, agent)` returns `{ model, card, note, context,
+  limits }` or null (`limits`: draw the card's lines under the row); `modelKind(agent)` is `"omp"`,
+  `"claude"`, `"commandcode"` (program key `command-code`), `"codex"` or null. Each refresh collects the
+  folder groups that are due (new member, status change, or 30 s old) and lists all their folders, plus
+  the Codex rollouts when needed, with ONE process per machine (`listMany`: `powershell Get-ChildItem` on
+  Windows, `ls -t` + `stat` elsewhere; the newest 8 per folder, 24 for Codex, `*.checkpoints.jsonl`
+  excluded). It reads each transcript once per (file, mtime), asks `hc get --json <address>` for the agent's
+  `created_ms`, `status_ms` and title, then calls `assignTranscripts`. The model catalog comes from
+  `omp models --json` every 10 min. The mod API's `fs/promises` has `exists`, `readdir`, `readFile`, but
+  no `stat`.
 - `assign.js`: `assignTranscripts(agents, candidates, now)` -> Map(agent id -> candidate | null), with agents
   `{ id, working, statusMs, createdMs, paneTitle }` and candidates `{ file, mtimeMs, title }`. Order: a
   transcript last written before the terminal started is ineligible; a title match (letters and digits of the
@@ -136,10 +150,10 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus eleven
 - `claude-session.js`: transcripts in `~/.claude/projects/<cwd with every non-alphanumeric -> "-">/`;
   `lastClaudeModel(text)` is the last `"model":"..."` that isn't `<synthetic>`; `claudeProvider(model)` is
   `anthropic` only for ids starting `claude-`.
-- Patch to `main.js`: import from `./quota.js`; in `init`, `this.quota` plus a `cx.timer.every(10000)` that
-  builds `targets` from `agents()` and `panes()` (cwd by `a.pane`) and calls `loadQuota`; in `render`,
-  `cwdOf = new Map(panes().map(p => [p.pane, p.cwd]))`; in `withKids`, `quotaBlock(t, agentQuota(...),
-  this.quota.used)` inserted after the row (not when collapsed).
+- Hooks in `main.js` (diff against `upstream/agents/main.js`): imports; `statusMenu` in the `init` early
+  return; `initQuota(this, cx)` at the end of `init`; the `statusMenu` / `status` returns in `render`;
+  `const reportOf = reportsOf(all)`; in `withKids`, the blocked reason and `quotaBlock` after the row (not
+  when collapsed) and the blocked reason after each sub-agent row; `quotaFooter` under `#ag-list`.
 
 Which quota an active model gets: `claude-*` (Claude Code) or `anthropic/*` (omp) -> live Anthropic card;
 `commandcode/*` (omp) or the `commandcode` CLI -> live Command Code card; `openai-codex/*` -> Codex, live from
@@ -147,9 +161,9 @@ Which quota an active model gets: `claude-*` (Claude Code) or `anthropic/*` (omp
 model name + note.
 
 Reads and runs (tell the person before installing): `exec("omp", ["usage","--json"])`;
-`exec("powershell", ["-NoProfile","-Command", "(Get-ChildItem -LiteralPath '<dir>' -Filter *.jsonl | Sort-Object
-LastWriteTime -Descending | Select-Object -First 1).Name"])` on Windows, `sh -c 'ls -t "$1"/*.jsonl | head -1'`
-elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
+`exec("powershell", ["-NoProfile","-Command", "<Get-ChildItem of every due folder>"])` on Windows,
+`sh -c '<ls -t + stat of every due folder>'` elsewhere (one call per refresh); `codex app-server`;
+`fs/promises` `exists`/`readdir`/`readFile` of transcripts and of
 `<home>/AppData/Local/herdr/plugins/herdr-agent-usage/` (Linux/macOS equivalents are tried);
 `readTextFile` of that folder's JSON and `quota-percent`. No network of its own, no writes. Herdr API used:
 `agents`, `panes`, `theme`, `home`, `exec`, `readTextFile`, `cx.timer.every`, `cx.spawn`.

@@ -1,14 +1,12 @@
-// Quota data for the agents list, drawn as compact rows under an agent: the active model, then its
-// subscription limits. Sources:
+// Quota data for the agents list (drawn by view.js): each agent's active model and context, and the
+// subscription limits. No rendering here. Sources:
 //  - `omp usage --json` (live): Anthropic 5h / 7d / 7d Fable and Command Code 5h / 7d / credits;
-//  - Codex's own rollouts (`~/.codex/sessions`), which carry the plan's limits as of the latest turn;
+//  - `codex app-server` (live), else Codex's own rollouts, which carry the plan's limits as of the latest turn;
 //  - the cache the herdr-agent-usage TUI plugin keeps, for the other providers (and Codex, if newer).
 // Limits are shown only when the agent's ACTIVE model is covered by that subscription: Claude Code
 // and omp read the model from their session transcript, so a gateway or API model (glm, kimi, a
 // university cluster, ...) shows its name but no quota.
 
-import { div, image, svg } from "gpui-kit";
-import { h_flex, v_flex } from "gpui-base";
 import * as fs from "fs/promises";
 import { home, readTextFile, exec, hc } from "herdr";
 import { parseReports } from "./reports.js";
@@ -17,12 +15,10 @@ import { claudeProjectDir, lastClaudeModel, claudeProvider, claudeTitle } from "
 import { commandcodeProjectDir, lastCommandcodeModel, commandcodeLastTokens } from "./commandcode-session.js";
 import { codexCwd, codexState, codexQuota, codexLiveQuota, sameFolder } from "./codex-session.js";
 import { assignTranscripts } from "./assign.js";
-import { availableSubscriptions, orderSubscriptions, codexCard } from "./subscriptions.js";
+import { codexCard } from "./subscriptions.js";
 import { ompCost, claudeCost, commandcodeCost, fmtCost } from "./cost.js";
-import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
-import { blockedReason, reasonText } from "./blocked.js";
+import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf } from "./context.js";
 
-const STALE_S = 30 * 60;
 const LIVE_EVERY_MS = 60000; // omp caches usage for 5 min itself
 const MODEL_EVERY_MS = 30000;
 const WINDOWS_EVERY_MS = 600000; // the model catalog (context windows) changes rarely
@@ -104,26 +100,44 @@ async function loadCache() {
   return { cache: new Map(), contexts: new Map(), used: false };
 }
 
-// Transcripts of a folder, newest write first, with their last write time (ms) as the OS knows it:
-// [{ file, mtimeMs }], `file` relative to `dir` (with `recursive`, it can be `2026/11/17/x.jsonl`). Names
-// alone can't say which agent is still writing. Empty if the OS can't tell.
+// Transcripts of several folders on one machine, listed by ONE process (one per folder spawned a
+// powershell per agent group every 30 s): Map(dir -> [{ file, mtimeMs }]), newest write first, with the
+// last write time (ms) as the OS knows it; `file` is relative to its dir (with `recursive`, it can be
+// `2026/11/17/x.jsonl`). Names alone can't say which agent is still writing, and the mod API has no file
+// times, hence a process at all. A folder with nothing listed has no entry. `reqs`: [{ dir, recursive, max }].
 // `machine` null = this computer; else that machine, through the core (assumed Unix).
 const MAX_CANDIDATES = 8;
 const MTIME_SH = '$(( $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") * 1000 ))';
-const LIST_SH = `for f in $(ls -t "$1"/*.jsonl 2>/dev/null | grep -v "\\.checkpoints\\.jsonl$" | head -n "$2"); do echo "$(basename "$f")|${MTIME_SH}"; done`;
-const LIST_SH_R = `for f in $(find "$1" -type f -name "*.jsonl" 2>/dev/null | xargs ls -t 2>/dev/null | head -n "$2"); do echo "\${f#$1/}|${MTIME_SH}"; done`;
-async function listTranscripts(dir, machine, { recursive = false, max = MAX_CANDIDATES } = {}) {
+// Arguments: (dir, recursive 1|0, max) per folder; prints `index|file|mtime`.
+const LIST_SH = 'i=0; while [ $# -ge 3 ]; do d=$1; n=$3; '
+  + 'if [ "$2" = 1 ]; then fs=$(find "$d" -type f -name "*.jsonl" 2>/dev/null | xargs ls -t 2>/dev/null | head -n "$n"); '
+  + 'else fs=$(ls -t "$d"/*.jsonl 2>/dev/null | grep -v "\\.checkpoints\\.jsonl$" | head -n "$n"); fi; '
+  + `for f in $fs; do echo "$i|\${f#$d/}|${MTIME_SH}"; done; i=$((i+1)); shift 3; done`;
+const psQuote = (s) => `'${s.replace(/'/g, "''")}'`;
+const listPs = (reqs) => "$q = @(); "
+  + reqs.map((r) => `$q += ,@(${psQuote(r.dir)}, $${r.recursive ? "true" : "false"}, ${r.max}); `).join("")
+  + "for ($i = 0; $i -lt $q.Count; $i++) { $root = (Get-Item -LiteralPath $q[$i][0] -ErrorAction SilentlyContinue).FullName; "
+  + "if ($root) { $root = $root.TrimEnd('\\'); Get-ChildItem -LiteralPath $root -Filter *.jsonl -File -Recurse:$q[$i][1] -ErrorAction SilentlyContinue "
+  + "| Where-Object { $_.Name -like '*.jsonl' -and $_.Name -notlike '*.checkpoints.jsonl' } | Sort-Object LastWriteTime -Descending "
+  + "| Select-Object -First $q[$i][2] | ForEach-Object { [string]$i + '|' + $_.FullName.Substring($root.Length + 1).Replace('\\', '/') + '|' "
+  + "+ [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() } } }";
+async function listMany(reqs, machine) {
+  const out = new Map();
+  if (!reqs.length) return out;
+  const shArgs = reqs.flatMap((q) => [q.dir, q.recursive ? "1" : "0", String(q.max)]);
   let r;
-  const sh = recursive ? LIST_SH_R : LIST_SH;
-  if (machine) r = await exec("sh", ["-c", sh, "sh", dir, String(max)], { on: machine, timeout: 30000 });
-  else if (/^[A-Za-z]:/.test(home())) {
-    r = await exec("powershell", ["-NoProfile", "-Command", `$root = (Get-Item -LiteralPath '${dir.replace(/'/g, "''")}' -ErrorAction SilentlyContinue).FullName; if ($root) { $root = $root.TrimEnd('\\'); Get-ChildItem -LiteralPath $root -Filter *.jsonl -File${recursive ? " -Recurse" : ""} -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.jsonl' -and $_.Name -notlike '*.checkpoints.jsonl' } | Sort-Object LastWriteTime -Descending | Select-Object -First ${max} | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\\', '/') + '|' + [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() } }`], { timeout: 10000 });
-  } else r = await exec("sh", ["-c", sh, "sh", dir, String(max)], { timeout: 10000 });
-  if (r.code !== 0) return [];
-  return r.stdout.split(/\r?\n/)
-    .map((l) => l.trim().split("|"))
-    .filter((p) => p.length === 2 && p[0].endsWith(".jsonl") && Number.isFinite(Number(p[1])))
-    .map(([file, ms]) => ({ file, mtimeMs: Number(ms) }));
+  if (machine) r = await exec("sh", ["-c", LIST_SH, "sh", ...shArgs], { on: machine, timeout: 30000 });
+  else if (/^[A-Za-z]:/.test(home())) r = await exec("powershell", ["-NoProfile", "-Command", listPs(reqs)], { timeout: 15000 });
+  else r = await exec("sh", ["-c", LIST_SH, "sh", ...shArgs], { timeout: 10000 });
+  if (r.code !== 0) return out;
+  for (const l of r.stdout.split(/\r?\n/)) {
+    const [i, file, ms] = l.trim().split("|");
+    const q = reqs[Number(i)];
+    if (!q || !file?.endsWith(".jsonl") || !Number.isFinite(Number(ms))) continue;
+    if (!out.has(q.dir)) out.set(q.dir, []);
+    out.get(q.dir).push({ file, mtimeMs: Number(ms) });
+  }
+  return out;
 }
 
 // A machine's home folder (this computer's, or asked once of the remote and kept). null if it can't be read.
@@ -221,21 +235,19 @@ const CODEX_LIVE_PS = "$p = New-Object System.Diagnostics.Process; $s = $p.Start
 const CODEX_LIVE_SH = 'f=$(mktemp) || exit 1; { printf "%s\\n" "$1" "$2" "$3"; i=0; while [ ! -s "$f" ] && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; } '
   + '| codex app-server 2>/dev/null | { grep -m1 "^{\\"id\\":2," > "$f"; cat > /dev/null; }; cat "$f"; rm -f "$f"';
 async function fetchCodexLive() {
-  try { await fs.stat(`${homePath()}/.codex`); } catch { return null; } // Codex never ran here
+  if (!(await fs.exists(`${homePath()}/.codex`))) return null; // Codex never ran here
   const r = /^[A-Za-z]:/.test(home())
     ? await exec("powershell", ["-NoProfile", "-Command", CODEX_LIVE_PS], { timeout: 30000 })
     : await exec("sh", ["-c", CODEX_LIVE_SH, "sh", ...CODEX_RPC], { timeout: 30000 });
   return r.code === 0 ? codexLiveQuota(r.stdout, Date.now() / 1000) : null;
 }
 
-// Codex's quota as of its last turn, from the newest rollout that has one (this computer only; any folder).
-// The fallback when the app server can't answer. A session signed in with an API key carries none, hence a
+// Codex's quota as of its last turn, from the newest of `cands` (rollouts, newest first) that has one. The
+// fallback when the app server can't answer. A session signed in with an API key carries none, hence a
 // few rollouts are tried. Files are read through the transcript cache, once per last write.
 const CODEX_QUOTA_SCAN = 8;
-async function fetchCodexRollout(fileCache) {
-  const root = SPECS.codex.root(null, homePath(), null);
-  try { await fs.stat(root); } catch { return null; } // no Codex here: don't start a listing every minute
-  for (const c of await listTranscripts(root, null, { recursive: true, max: CODEX_QUOTA_SCAN })) {
+async function codexFromRollouts(root, cands, fileCache) {
+  for (const c of cands.slice(0, CODEX_QUOTA_SCAN)) {
     const info = await readTranscript(SPECS.codex, root, c, fileCache, null);
     if (info?.quota) return info.quota;
   }
@@ -243,18 +255,15 @@ async function fetchCodexRollout(fileCache) {
 }
 
 // Works out which transcript each agent of one group (same machine, kind and folder) is writing, and reads
-// its model and context. -> Map(address -> { model, tokens, pct, sessionId }). Agents with no transcript
-// of their own get nothing rather than another agent's.
-async function resolveGroup(kind, cwd, machine, members, cache, homes) {
+// its model and context. `root` is the group's transcript folder and `cands` its listing (see listMany).
+// -> Map(address -> { model, tokens, pct, sessionId }). Agents with no transcript of their own get nothing
+// rather than another agent's.
+async function resolveGroup(kind, cwd, machine, members, cache, root, cands) {
   const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, pct: null, cost: null, sessionId: null }]));
   const spec = SPECS[kind];
-  const h = await homeOf(machine, homes);
-  const root = h ? await spec.root(cwd, h, machine) : null;
   if (!root) return out;
   const metas = [];
   for (const m of members) metas.push(await agentMeta(m.address));
-  let cands = [];
-  try { cands = await listTranscripts(root, machine, spec.list); } catch { /* fall through to the name order */ }
   if (!cands.length && kind === "omp" && !machine) { // no file times: omp names sort by start time
     try { const f = newestTranscript(await fs.readdir(root)); if (f) cands = [{ file: f, mtimeMs: Date.now() }]; } catch { /* none */ }
   }
@@ -313,16 +322,6 @@ export async function loadQuota(prev, targets = []) {
   }
   const fileCache = prev?.fileCache ?? new Map();
   const homes = prev?.homes ?? new Map();
-  let codex = prev?.codex ?? null;
-  let codexAt = prev?.codexAt ?? 0;
-  if (Date.now() - codexAt >= LIVE_EVERY_MS) {
-    codexAt = Date.now();
-    let fresh = null;
-    try { fresh = await fetchCodexLive(); } catch { /* codex missing or offline */ }
-    if (!fresh) try { fresh = await fetchCodexRollout(fileCache); } catch { /* unreadable */ }
-    // Keep whichever reading is newer: an old rollout must not replace a live reading that just failed.
-    if (fresh && (!codex || fresh.fetched >= codex.fetched)) codex = fresh;
-  }
   const groups = new Map();
   for (const t of targets) {
     const key = `${machineOf(t.address) ?? ""}\u0000${t.kind}\u0000${t.cwd}`;
@@ -330,6 +329,7 @@ export async function loadQuota(prev, targets = []) {
     groups.get(key).push(t);
   }
   const models = new Map();
+  const due = []; // groups to redo, with their transcript folder
   for (const members of groups.values()) {
     // Redo a group when any member is new, changed status (its transcript just got written) or aged out.
     const fresh = members.every((m) => {
@@ -337,7 +337,45 @@ export async function loadQuota(prev, targets = []) {
       return old && old.status === m.status && Date.now() - old.at < MODEL_EVERY_MS;
     });
     if (fresh) { for (const m of members) models.set(m.address, prev.models.get(m.address)); continue; }
-    const resolved = await resolveGroup(members[0].kind, members[0].cwd, machineOf(members[0].address), members, fileCache, homes);
+    const { kind, cwd } = members[0];
+    const machine = machineOf(members[0].address);
+    const h = await homeOf(machine, homes);
+    due.push({ members, machine, root: h ? await SPECS[kind].root(cwd, h, machine) : null });
+  }
+  // Codex's quota: asked live; when that fails, read from its newest rollouts (listed below with the rest).
+  let codex = prev?.codex ?? null;
+  let codexAt = prev?.codexAt ?? 0;
+  let codexFresh = null, codexRollouts = null;
+  if (Date.now() - codexAt >= LIVE_EVERY_MS) {
+    codexAt = Date.now();
+    try { codexFresh = await fetchCodexLive(); } catch { /* codex missing or offline */ }
+    const root = SPECS.codex.root(null, homePath(), null);
+    if (!codexFresh && await fs.exists(root)) codexRollouts = root;
+  }
+  // One listing per machine for every folder due ("" = this computer); a folder asked twice is listed once.
+  const reqs = new Map();
+  const want = (machine, dir, { recursive = false, max = MAX_CANDIDATES } = {}) => {
+    const m = machine ?? "";
+    if (!reqs.has(m)) reqs.set(m, new Map());
+    const old = reqs.get(m).get(dir);
+    reqs.get(m).set(dir, { dir, recursive: recursive || Boolean(old?.recursive), max: Math.max(max, old?.max ?? 0) });
+  };
+  for (const g of due) if (g.root) want(g.machine, g.root, SPECS[g.members[0].kind].list);
+  if (codexRollouts) want(null, codexRollouts, { recursive: true, max: CODEX_QUOTA_SCAN });
+  const listed = new Map();
+  for (const [m, byDir] of reqs) {
+    let found = new Map();
+    try { found = await listMany([...byDir.values()], m || null); } catch { /* unreachable: nothing listed */ }
+    listed.set(m, found);
+  }
+  const candsOf = (machine, dir) => listed.get(machine ?? "")?.get(dir) ?? [];
+  if (codexRollouts) {
+    try { codexFresh = await codexFromRollouts(codexRollouts, candsOf(null, codexRollouts), fileCache); } catch { /* unreadable */ }
+  }
+  // Keep whichever reading is newer: an old rollout must not replace a live reading that just failed.
+  if (codexFresh && (!codex || codexFresh.fetched >= codex.fetched)) codex = codexFresh;
+  for (const { members, machine, root } of due) {
+    const resolved = await resolveGroup(members[0].kind, members[0].cwd, machine, members, fileCache, root, candsOf(machine, root));
     for (const m of members) models.set(m.address, { ...resolved.get(m.address), status: m.status, at: Date.now() });
   }
   return { live, liveRemote, liveAt, codex, codexAt, windows, windowsAt, fileCache, homes, models, ...(await loadCache()) };
@@ -392,217 +430,5 @@ export function agentQuota(q, agent) {
   return card ? { model: null, card, note: null, context: null, limits: true } : null;
 }
 
-function until(unix) {
-  const s = unix - Date.now() / 1000;
-  if (s <= 0) return "now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return h < 48 ? `${h}h${String(m % 60).padStart(2, "0")}` : `${Math.floor(h / 24)}d`;
-}
-
-function gauge(t, pct, color) {
-  return div().h(3).flex_1().rounded(2).bg(t.raised).overflow_hidden()
-    .child(div().h(3).w(`${Math.max(0, Math.min(100, pct))}%`).rounded(2).bg(color));
-}
-
-function line(t, name, shownPct, remaining, tail, dim) {
-  // Severity follows headroom whichever way the number is shown.
-  let color = t.ansi2;
-  if (dim) color = t.dim;
-  else if (remaining < 15) color = t.ansi1;
-  else if (remaining < 40) color = t.ansi3;
-  return h_flex().h(15).flex_none().items_center().gap(6)
-    .child(div().w(32).text_size(10.5).text_color(t.dim).child(name))
-    .child(gauge(t, shownPct, color))
-    .child(div().w(30).text_size(10.5).text_color(dim ? t.dim : t.muted).child(`${Math.round(shownPct)}%`))
-    .child(div().w(38).text_size(10).text_color(t.dim).child(tail ?? ""));
-}
-
-// A window whose reset has passed: the cached number belongs to the previous period, so show no
-// number (the plugin shows N/A too) rather than a wrong one.
-function expiredLine(t, name) {
-  return h_flex().h(15).flex_none().items_center().gap(6)
-    .child(div().w(32).text_size(10.5).text_color(t.dim).child(name))
-    .child(gauge(t, 0, t.dim))
-    .child(div().w(30).text_size(10.5).text_color(t.dim).child("n/a"))
-    .child(div().w(38).text_size(10).text_color(t.dim).child("reset"));
-}
-
 // Providers a subscription can cover: an agent's cost on them is shown as an estimate ("≈$8.90").
 const SUBSCRIPTION_PROVIDERS = new Set(["anthropic", "commandcode", "openai-codex"]);
-
-// "anthropic/claude-opus-5-5 · no subscription quota          ≈$8.90": the session cost sits at the right.
-function modelLine(t, model, note, cost) {
-  return h_flex().h(15).flex_none().items_center().gap(6)
-    .child(div().min_w(0).truncate().text_size(10.5).text_color(t.muted).child(model ?? "model unknown"))
-    .when(Boolean(note), (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(`· ${note}`)))
-    .when(Boolean(cost), (e) => e.child(div().flex_1()).child(div().flex_none().text_size(10.5).text_color(t.muted).child(cost)));
-}
-
-// How full the context window is: "ctx  ▬▬▬▬  34%  336k". Always % USED (as agents' own footers show it),
-// whatever the quota rows show. Red past 85%, yellow past 60%. Without a percent, just the token count.
-function contextLine(t, ctx) {
-  if (ctx.pct === null) {
-    return h_flex().h(15).flex_none().items_center().gap(6)
-      .child(div().w(32).text_size(10.5).text_color(t.dim).child("ctx"))
-      .child(div().text_size(10.5).text_color(t.muted).child(`${fmtTokens(ctx.tokens)} tokens`));
-  }
-  return line(t, "ctx", ctx.pct, 100 - ctx.pct, ctx.tokens ? fmtTokens(ctx.tokens) : "", false);
-}
-
-// Why an agent is blocked, under its row: "Permission · Run: rm -rf build/ ?" in the blocked colour, up to two
-// lines (clipped, nothing scrolls), full text on hover. `report` is the agent's own status record; null
-// unless it is blocked. `key` makes the hover target unique; `pl` lines the text up under the name.
-export function blockedRow(t, report, key, pl = 33) {
-  const text = reasonText(blockedReason(report));
-  if (!text) return null;
-  return div().id(`why-${key}`).flex_none().pl(pl).pr(8).pb(4).max_h(32).overflow_hidden()
-    .text_size(10.5).text_color(t.blocked).tooltip(text).child(text);
-}
-
-// The block under an agent row, indented to line up under its name: model, context, then quota.
-export function quotaBlock(t, info, used) {
-  if (!info) return null;
-  const now = Date.now() / 1000;
-  const rows = [];
-  if (info.model !== null || info.note) rows.push(modelLine(t, info.model, info.note, info.cost));
-  if (info.context) rows.push(contextLine(t, info.context));
-  // Limits under an agent only where nothing else shows them (`limits`): an agent whose model the mod can't
-  // read (a program without a transcript reader), or one on another machine (its machine's own logins; the
-  // footer and status bar are this computer's). Otherwise the row keeps to model and context.
-  const card = info.limits ? info.card : null;
-  if (card) {
-    const stale = card.fetched !== null && now - card.fetched > STALE_S;
-    const show = (w) => (used ? w.used : w.remaining);
-    for (const w of card.windows) {
-      if (w.resets !== null && w.resets <= now) rows.push(expiredLine(t, w.label));
-      else rows.push(line(t, w.label, show(w), w.remaining, w.tail ?? (w.resets ? until(w.resets) : ""), stale));
-    }
-  }
-  return rows.length ? v_flex().flex_none().pl(33).pr(8).pb(4).gap(1).children(rows) : null;
-}
-
-// Footer: one row per subscription (see subscriptions.js), styled after Over9k's usage block: icon, name,
-// the headline limit's % and its reset time, a chevron. A click opens every limit as a bar; a click on a
-// limit pins it as the row's headline (again to unpin). Credits (Cr) show their money, not a percent.
-const ROW = 28, LIMIT = 20, FOOTER_MAX = 180;
-
-// Severity by % USED, as Over9k does: red from 80, yellow from 50.
-const severity = (t, used) => (used >= 80 ? t.ansi1 : used >= 50 ? t.ansi3 : t.ansi2);
-
-// The limit the collapsed row shows: the pinned one, else the fullest that hasn't reset.
-function headline(windows, picked, now) {
-  const pct = windows.filter((w) => w.label !== "Cr");
-  return pct.find((w) => w.label === picked)
-    ?? pct.filter((w) => w.resets === null || w.resets > now).reduce((a, b) => (!a || b.used > a.used ? b : a), null)
-    ?? pct[0] ?? null;
-}
-
-function limitRow(t, s, w, pinned, ui, now, stale) {
-  const expired = w.resets !== null && w.resets <= now;
-  const used = expired ? 0 : Math.max(0, Math.min(100, w.used));
-  const color = expired || stale ? t.dim : severity(t, used);
-  const credits = w.label === "Cr";
-  const row = h_flex().id(`limit-${s.id}-${w.label}`).h(LIMIT).items_center().gap(7).text_size(11.5).rounded(4)
-    .child(div().w(44).flex_none().truncate().text_color(pinned ? t.accent : t.muted).child(w.label));
-  if (credits) {
-    return row.child(div().flex_1().flex().justify_end().text_color(t.foreground).child(w.tail ?? ""));
-  }
-  return row.cursor_pointer().hover((x) => x.bg(t.hover))
-    .on_click((_e, cx) => ui.pick(s.id, w.label, cx))
-    .tooltip(pinned ? "Unpin as headline number" : "Pin as headline number")
-    .child(div().flex_1().h(3).rounded(2).bg(t.raised)
-      .child(div().h(3).rounded(2).bg(color).w(`${Math.max(used > 0 ? 3 : 0, used)}%`)))
-    .child(div().w(30).flex_none().flex().justify_end().text_color(color).child(expired ? "n/a" : `${Math.round(used)}%`))
-    .child(div().w(44).flex_none().flex().justify_end().text_size(10.5).text_color(t.dim)
-      .child(w.resets === null ? "" : expired ? "reset" : until(w.resets)));
-}
-
-function subscriptionRow(t, s, i, ui, now) {
-  const card = s.data;
-  const stale = card.fetched !== null && now - card.fetched > STALE_S;
-  const open = ui.open.has(s.id);
-  const picked = ui.picked[s.id];
-  const top = headline(card.windows, picked, now);
-  const expired = top && top.resets !== null && top.resets <= now;
-  const used = top ? (expired ? 0 : Math.max(0, Math.min(100, top.used))) : 0;
-  const resets = card.windows
-    .filter((w) => w.resets !== null)
-    .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
-    .join(" · ");
-  const file = `icons/${s.icon}.svg`;
-  const pic = s.tint ? svg(file).size(12).flex_none().text_color(t.muted) : image(file).w(12).h(12).flex_none();
-  const color = expired || stale ? t.dim : severity(t, used);
-  const head = h_flex().id(`pinned-${s.id}`).h(ROW).px(4).gap(6).items_center().rounded(6).cursor_pointer()
-    .hover((x) => x.bg(t.hover))
-    .on_click((_e, cx) => ui.toggle(s.id, cx))
-    .tooltip(`${s.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
-    .child(pic)
-    .child(div().min_w(0).flex_shrink(1).truncate().text_color(t.muted).child(s.name))
-    .child(h_flex().flex_1().min_w(0).justify_end().overflow_hidden()
-      .when(Boolean(top) && !open && top.resets !== null && !expired, (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(until(top.resets)))))
-    .when(Boolean(top) && !open, (el) => el.child(div().w(32).flex_none().flex().justify_end().text_color(color)
-      .child(expired ? "n/a" : `${Math.round(used)}%`)))
-    .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(8).flex_none().text_color(t.dim));
-  const limits = [...card.windows].sort((a, b) => (b.label === picked) - (a.label === picked));
-  return v_flex().w_full()
-    .when(i > 0, (el) => el.border_t(1).border_color(t.border))
-    .child(head)
-    .when(open, (el) => el.child(v_flex().px(4).pb(4)
-      .children(limits.map((w) => limitRow(t, s, w, w.label === picked, ui, now, stale)))));
-}
-
-// `ui` = { active: Set of provider ids with a running agent, open: Set of subscription ids,
-// picked: { id: window label }, toggle(id, cx), pick(id, label, cx) }. Subscriptions with a running agent
-// come first. null when no subscription has data.
-export function summaryFooter(t, q, ui) {
-  const now = Date.now() / 1000;
-  const shown = orderSubscriptions(availableSubscriptions(q), ui.active);
-  if (!shown.length) return null;
-  // Capped so a long list or several open rows never squeeze the agents list; it scrolls instead.
-  return v_flex().flex_none().w_full().border_t(1).border_color(t.border)
-    .child(v_flex().id("pinned-list").w_full().max_h(FOOTER_MAX).pt(3).px(10).text_size(12.5).overflow_y_scrollbar()
-      .children(shown.map((s, i) => subscriptionRow(t, s, i, ui, now))));
-}
-
-// Status bar strip: per selected subscription its icon and one pill per limit, "5h 86% 1h12  7d 81% 3d",
-// as % REMAINING (red under 15%, yellow under 40%) and the time to its reset, dimmed. Hover for the full
-// reset list. Returns null when nothing is selected or has data. `items` come from availableSubscriptions + pickSubscriptions.
-const SHORT = { Fable: "Fbl" };
-
-function pill(t, w, now, stale) {
-  const expired = w.resets !== null && w.resets <= now;
-  let color = t.ansi2;
-  if (expired || stale) color = t.dim;
-  else if (w.remaining < 15) color = t.ansi1;
-  else if (w.remaining < 40) color = t.ansi3;
-  let text = `${Math.round(w.remaining)}%`;
-  const credits = w.label === "Cr";
-  if (credits && w.tail) text = w.tail; // credits: the money left says more than a percent
-  if (expired) text = "n/a";
-  return h_flex().flex_none().items_center().gap(3)
-    .child(div().text_size(10).text_color(t.dim).child(SHORT[w.label] ?? w.label))
-    .child(div().text_size(10.5).font_semibold().text_color(color).child(text))
-    .when(!credits && !expired && w.resets !== null, (el) => el.child(div().text_size(10).text_color(t.dim).child(until(w.resets))));
-}
-
-export function statusStrip(t, items) {
-  if (!items.length) return null;
-  const now = Date.now() / 1000;
-  return h_flex().flex_none().items_center().gap(14)
-    .children(items.map((s) => {
-      const card = s.data;
-      const stale = card.fetched !== null && now - card.fetched > STALE_S;
-      const resets = card.windows
-        .filter((w) => w.resets !== null)
-        .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
-        .join(" · ");
-      const file = `icons/${s.icon}.svg`;
-      const pic = s.tint ? svg(file).size(12).flex_none().text_color(t.muted) : image(file).w(12).h(12).flex_none();
-      return h_flex().id(`status-${s.id}`).flex_none().items_center().gap(7)
-        .tooltip(`${s.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
-        .child(pic)
-        .children(card.windows.map((w) => pill(t, w, now, stale)));
-    }));
-}

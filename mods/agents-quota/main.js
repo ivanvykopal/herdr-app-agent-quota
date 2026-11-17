@@ -2,9 +2,10 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, keys } from "herdr";
-import { loadQuota, agentQuota, modelKind, quotaBlock, summaryFooter, blockedRow, statusStrip } from "./quota.js";
-import { SUBSCRIPTIONS, availableSubscriptions, pickSubscriptions } from "./subscriptions.js";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import { agentQuota } from "./quota.js";
+import { quotaBlock, blockedRow } from "./view.js";
+import { initQuota, reportsOf, quotaFooter, statusMenu, statusBar } from "./panel.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -24,8 +25,7 @@ function toggleSidebar() {
   if (!narrow()) setShared("sidebar.width", width);
   // Mods edited before the rail went by width still read the flag.
   setShared("sidebar.collapsed", !narrow());
-  const rail = window()?.platform === "macos" ? 76 : 44;
-  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : rail });
+  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
 }
 
 // Drops what an agent puts before its title: a status glyph or spinner and the separator
@@ -57,8 +57,7 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
 const kidStatus = (k, listed) => {
   const s = listed.get(k.address) ?? k.status;
-  if (s === "error") return "blocked";
-  return s === "done" ? "idle" : s;
+  return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
@@ -94,30 +93,7 @@ export default class Agents extends View {
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
     cx.timer.every(30000, (cx) => cx.notify());
-    // Live limits (omp usage), the plugin's cache, and each omp / Claude Code agent's active model
-    // (read from its transcript by folder): quota shows only if that model has a subscription.
-    this.quota = { live: new Map(), cache: new Map(), models: new Map(), used: false };
-    this.pinnedOpen = new Set(shared("agentsQuota.open") ?? []); // subscription ids opened in the footer
-    this.pinnedPicked = shared("agentsQuota.headline") ?? {}; // subscription id -> pinned headline limit
-    this.reloading = false; // a remote machine can answer slowly: never stack reloads on top of each other
-    const reloadQuota = (cx) => {
-      if (this.reloading) return;
-      this.reloading = true;
-      cx.spawn(async (cx) => {
-        try {
-          const cwds = new Map(panes().map((p) => [p.pane, p.cwd]));
-          const targets = agents()
-            .map((a) => ({ kind: modelKind(a), cwd: cwds.get(a.pane), address: a.address, status: a.status }))
-            .filter((x) => x.kind && x.cwd);
-          this.quota = await loadQuota(this.quota, targets);
-        } finally {
-          this.reloading = false;
-        }
-        cx.notify();
-      });
-    };
-    cx.timer.every(10000, reloadQuota);
-    reloadQuota(cx);
+    initQuota(this, cx);
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -191,55 +167,6 @@ export default class Agents extends View {
         .when(s.id === on, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
   }
 
-  // The status bar's subscription picker: a check on each one shown in the bar.
-  statusMenu(t) {
-    const picked = shared("agentsQuota.statusPinned") ?? null;
-    const on = (id) => !picked || picked.includes(id);
-    return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
-      .child(div().px(8).pt(4).pb(6).text_size(11).text_color(t.dim).child("Show in status bar"))
-      .children(SUBSCRIPTIONS.map((s) => h_flex().id(`pick-${s.id}`).h(31).px(8).gap(9).rounded(7).items_center()
-        .text_color(t.foreground).hover((el) => el.bg(t.hover))
-        .on_click((_e, cx) => {
-          const ids = (picked ?? SUBSCRIPTIONS.map((x) => x.id)).filter((id) => id !== s.id);
-          setShared("agentsQuota.statusPinned", on(s.id) ? ids : [...ids, s.id]);
-          cx.notify();
-        })
-        .child(div().flex_1().child(s.name))
-        .when(on(s.id), (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
-  }
-
-  // The palette key as actually bound; without a binding the hint stays useful ("commands").
-  hint() {
-    const mac = window()?.platform === "macos";
-    const mod = { cmd: mac ? "⌘" : "Ctrl+", ctrl: mac ? "⌃" : "Ctrl+", shift: mac ? "⇧" : "Shift+", alt: mac ? "⌥" : "Alt+", option: mac ? "⌥" : "Alt+" };
-    const b = keys().find((k) => k.section === "global" && k.action === "app.palette");
-    const parts = b && b.keys.endsWith("--") ? [...b.keys.slice(0, -2).split("-"), "-"] : b?.keys.split("-");
-    const key = parts && parts.map((p) => mod[p.toLowerCase()] ?? p.toUpperCase()).join("");
-    return key ? `${key}  commands` : "commands";
-  }
-
-  // The window's bottom bar (layout block with props.status): where it runs, branch, agent count, then the
-  // selected subscriptions' limits; click them to choose which.
-  statusBar(t) {
-    const space = spaces().find((s) => s.active);
-    const list = agents();
-    const needs = list.filter((a) => a.status === "blocked").length;
-    const label = (icon, text) => h_flex().gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13)).child(text);
-    const available = availableSubscriptions(this.quota);
-    const strip = statusStrip(t, pickSubscriptions(available, shared("agentsQuota.statusPinned") ?? null));
-    const menu = () => openOverlay({ mod: "agents-quota", kind: "popup", width: 240, height: 40 + 31 * SUBSCRIPTIONS.length, props: { statusMenu: true } });
-    return h_flex().size_full().px(14).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8).text_color(t.muted)
-      .child(label(space?.machine ? "server" : "monitor", space?.machine ?? "This computer"))
-      .when(Boolean(space?.branch), (el) => el.child(label("branch", space.branch)))
-      .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
-        .when(needs > 0, (el) => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
-      .when(available.length > 0, (el) => el.child(h_flex().id("status-quota").flex_none().items_center().px(6).h(20).rounded(5).cursor_pointer()
-        .hover((x) => x.bg(t.hover)).tooltip("Choose the subscriptions shown here").on_click(menu)
-        .child(strip ?? div().text_size(10.5).text_color(t.dim).child("quota"))))
-      .child(div().flex_1())
-      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint()));
-  }
-
   peek(addr) {
     run("terminal.peek", { terminal: addr });
   }
@@ -286,29 +213,24 @@ export default class Agents extends View {
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
-    if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(`${t.blocked}26`).text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
-    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(`${t.blocked}26`).text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
+    if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
+    if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
     // Idle: a ring; done: a dot.
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
-    return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : `${t.dim}00`);
+    return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : t.dim + "00");
   }
 
-  render(_cx) {
+  render(cx) {
     const t = theme();
     if (props()?.sortMenu) return this.sortMenu(t);
-    if (props()?.statusMenu) return this.statusMenu(t);
-    if (props()?.status) return this.statusBar(t);
+    if (props()?.statusMenu) return statusMenu(t);
+    if (props()?.status) return statusBar(this, t);
     const collapsed = narrow();
     const sort = sortOf();
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
-    // The agent's own status record (state, kind, msg): where a blocked agent says why.
-    const recs = new Map(all.map((x) => [x.address, x]));
-    const reportOf = (address) => {
-      const r = recs.get(address);
-      return r?.report ?? (r?.status && typeof r.status === "object" ? r.status : null);
-    };
+    const reportOf = reportsOf(all);
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
@@ -358,8 +280,7 @@ export default class Agents extends View {
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => {
           cx.stop_propagation();
-          if (open) this.folded.add(a.address);
-          else this.folded.delete(a.address);
+          open ? this.folded.add(a.address) : this.folded.delete(a.address);
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
@@ -370,12 +291,7 @@ export default class Agents extends View {
     // agent's own title, never an automatic tab number unless two rows would
     // otherwise read the same.
     // Read the pane snapshot once: every host read copies the whole list into JS.
-    const paneList = panes();
-    const leads = leadPanes(paneList);
-    // (each agent's own transcript is worked out in the loader, so no per-folder lookup is needed here)
-    // Providers an agent is using right now: their subscriptions rank first in the footer.
-    // (a remote agent's subscription is another account, so it must not light up the footer's local ones)
-    const activeProviders = new Set(list.filter((a) => !a.address.includes("/")).map((a) => agentQuota(this.quota, a)?.card?.provider).filter(Boolean));
+    const leads = leadPanes(panes());
     const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
     const labels = new Map(list.map(a => {
       const tab = tabs.get(a.tab);
@@ -452,8 +368,7 @@ export default class Agents extends View {
         .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
           .when(subs.length > 0, el => el.on_click((_e, cx) => {
             cx.stop_propagation();
-            if (this.folded.has(a.address)) this.folded.delete(a.address);
-            else this.folded.add(a.address);
+            this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
             cx.notify();
           })).child(pic)))
         .child(h_flex().flex_1().min_w(0).gap(5).items_center()
@@ -493,8 +408,7 @@ export default class Agents extends View {
         .cursor_pointer()
         .hover((s) => s.text_color(t.foreground))
         .on_click((_e, cx) => {
-          if (open) this.folded.add(g.id);
-          else this.folded.delete(g.id);
+          open ? this.folded.add(g.id) : this.folded.delete(g.id);
           cx.notify();
         })
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
@@ -542,21 +456,7 @@ export default class Agents extends View {
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
-      .when(!collapsed, (el) => el.child(summaryFooter(t, this.quota, {
-        active: activeProviders,
-        open: this.pinnedOpen,
-        picked: this.pinnedPicked,
-        toggle: (id, cx) => {
-          if (this.pinnedOpen.has(id)) this.pinnedOpen.delete(id); else this.pinnedOpen.add(id);
-          setShared("agentsQuota.open", [...this.pinnedOpen]);
-          cx.notify();
-        },
-        pick: (id, label, cx) => {
-          if (this.pinnedPicked[id] === label) delete this.pinnedPicked[id]; else this.pinnedPicked[id] = label;
-          setShared("agentsQuota.headline", this.pinnedPicked);
-          cx.notify();
-        },
-      }) ?? div()))
+      .when(!collapsed, (el) => el.child(quotaFooter(this, t, list)))
       .when(collapsed, (el) =>
         el.child(
           h_flex()

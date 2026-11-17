@@ -127,9 +127,9 @@ Mods are trusted code. This one:
 - if `~/.codex/` exists, runs `codex app-server` once a minute (through `powershell` + `cmd /c` on Windows,
   `sh` elsewhere, with a temporary file from `mktemp` that it deletes) to ask for the Codex limits; Codex
   contacts its usage endpoint itself, and the server exits as soon as it has answered;
-- runs `powershell` (Windows) or `sh` + `ls` (macOS / Linux) every ~30 s per Claude Code / omp / Command
-  Code / Codex agent to find the newest session transcripts by file time, and, when the Codex query
-  fails, to find the newest Codex rollouts;
+- runs one `powershell` (Windows) or `sh` + `ls` (macOS / Linux) per refresh, at most every ~30 s per
+  agent folder and once for all of them, to list the newest session transcripts by file time (the mod
+  API has no file times), plus the newest Codex rollouts when the Codex query fails;
 - reads session transcripts under `~/.omp/agent/sessions/`, `~/.claude/projects/`,
   `~/.commandcode/projects/` and `~/.codex/sessions/` (the 24 newest uncompressed rollouts; only the folder,
   model name, title, token counts and Codex's `rate_limits` are used), and, if present, the
@@ -167,8 +167,9 @@ deleted when the session ends. It makes no network calls.
   computer's: if omp isn't installed or logged in there, the row says `quota not read on <machine>`. The
   pinned footer stays local. The remote machine is assumed to be Unix (`sh`, `ls`, `stat`, `head`, `tail`),
   and its clock is used for matching transcripts to agents. Each refresh costs a few SSH round trips.
-- It is a modified copy of Herdr's `agents` mod; Herdr never updates it. After an app update, re-clone
-  `agents` and re-apply the patch (see `RECIPE.md`, *Built from*).
+- It is a modified copy of Herdr's `agents` mod; Herdr never updates it. After an app update, run
+  `sh sync-upstream.sh` (Git Bash on Windows, with the app running): it merges the new shipped `agents` mod
+  into `mods/agents-quota/main.js` and reports any conflicts to resolve; then `./install.sh`.
 
 ## License
 
