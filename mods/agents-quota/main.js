@@ -2,8 +2,9 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
-import { loadQuota, agentQuota, modelKind, quotaBlock, summaryFooter, blockedRow } from "./quota.js";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, keys } from "herdr";
+import { loadQuota, agentQuota, modelKind, quotaBlock, summaryFooter, blockedRow, statusStrip } from "./quota.js";
+import { SUBSCRIPTIONS, availableSubscriptions, pickSubscriptions } from "./subscriptions.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -83,7 +84,7 @@ function icon(p, size, color) {
 
 export default class Agents extends View {
   init(_props, cx) {
-    if (props()?.sortMenu) return;
+    if (props()?.sortMenu || props()?.statusMenu) return;
     this.folded = new Set();
     // Each agent's last state and when it changed (ms), kept across restarts.
     try { this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}"); } catch { this.changed = {}; }
@@ -96,7 +97,8 @@ export default class Agents extends View {
     // Live limits (omp usage), the plugin's cache, and each omp / Claude Code agent's active model
     // (read from its transcript by folder): quota shows only if that model has a subscription.
     this.quota = { live: new Map(), cache: new Map(), models: new Map(), used: false };
-    this.pinnedOpen = false; // the pinned-subscriptions footer: collapsed to a few, or all
+    this.pinnedOpen = new Set(shared("agentsQuota.open") ?? []); // subscription ids opened in the footer
+    this.pinnedPicked = shared("agentsQuota.headline") ?? {}; // subscription id -> pinned headline limit
     this.reloading = false; // a remote machine can answer slowly: never stack reloads on top of each other
     const reloadQuota = (cx) => {
       if (this.reloading) return;
@@ -187,6 +189,55 @@ export default class Agents extends View {
         .child(svg(`mods/workspace-chrome/${s.icon}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().child(s.label))
         .when(s.id === on, (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
+  }
+
+  // The status bar's subscription picker: a check on each one shown in the bar.
+  statusMenu(t) {
+    const picked = shared("agentsQuota.statusPinned") ?? null;
+    const on = (id) => !picked || picked.includes(id);
+    return v_flex().w_full().p(5).bg(t.popover).text_size(12.8)
+      .child(div().px(8).pt(4).pb(6).text_size(11).text_color(t.dim).child("Show in status bar"))
+      .children(SUBSCRIPTIONS.map((s) => h_flex().id(`pick-${s.id}`).h(31).px(8).gap(9).rounded(7).items_center()
+        .text_color(t.foreground).hover((el) => el.bg(t.hover))
+        .on_click((_e, cx) => {
+          const ids = (picked ?? SUBSCRIPTIONS.map((x) => x.id)).filter((id) => id !== s.id);
+          setShared("agentsQuota.statusPinned", on(s.id) ? ids : [...ids, s.id]);
+          cx.notify();
+        })
+        .child(div().flex_1().child(s.name))
+        .when(on(s.id), (el) => el.child(svg("mods/workspace-chrome/check.svg").size(14).flex_none().text_color(t.foreground)))));
+  }
+
+  // The palette key as actually bound; without a binding the hint stays useful ("commands").
+  hint() {
+    const mac = window()?.platform === "macos";
+    const mod = { cmd: mac ? "⌘" : "Ctrl+", ctrl: mac ? "⌃" : "Ctrl+", shift: mac ? "⇧" : "Shift+", alt: mac ? "⌥" : "Alt+", option: mac ? "⌥" : "Alt+" };
+    const b = keys().find((k) => k.section === "global" && k.action === "app.palette");
+    const parts = b && b.keys.endsWith("--") ? [...b.keys.slice(0, -2).split("-"), "-"] : b?.keys.split("-");
+    const key = parts && parts.map((p) => mod[p.toLowerCase()] ?? p.toUpperCase()).join("");
+    return key ? `${key}  commands` : "commands";
+  }
+
+  // The window's bottom bar (layout block with props.status): where it runs, branch, agent count, then the
+  // selected subscriptions' limits; click them to choose which.
+  statusBar(t) {
+    const space = spaces().find((s) => s.active);
+    const list = agents();
+    const needs = list.filter((a) => a.status === "blocked").length;
+    const label = (icon, text) => h_flex().gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13)).child(text);
+    const available = availableSubscriptions(this.quota);
+    const strip = statusStrip(t, pickSubscriptions(available, shared("agentsQuota.statusPinned") ?? null));
+    const menu = () => openOverlay({ mod: "agents-quota", kind: "popup", width: 240, height: 40 + 31 * SUBSCRIPTIONS.length, props: { statusMenu: true } });
+    return h_flex().size_full().px(14).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8).text_color(t.muted)
+      .child(label(space?.machine ? "server" : "monitor", space?.machine ?? "This computer"))
+      .when(Boolean(space?.branch), (el) => el.child(label("branch", space.branch)))
+      .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
+        .when(needs > 0, (el) => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
+      .when(available.length > 0, (el) => el.child(h_flex().id("status-quota").flex_none().items_center().px(6).h(20).rounded(5).cursor_pointer()
+        .hover((x) => x.bg(t.hover)).tooltip("Choose the subscriptions shown here").on_click(menu)
+        .child(strip ?? div().text_size(10.5).text_color(t.dim).child("quota"))))
+      .child(div().flex_1())
+      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint()));
   }
 
   peek(addr) {
@@ -492,7 +543,17 @@ export default class Agents extends View {
       .when(!collapsed, (el) => el.child(summaryFooter(t, this.quota, {
         active: activeProviders,
         open: this.pinnedOpen,
-        toggle: (_e, cx) => { this.pinnedOpen = !this.pinnedOpen; cx.notify(); },
+        picked: this.pinnedPicked,
+        toggle: (id, cx) => {
+          if (this.pinnedOpen.has(id)) this.pinnedOpen.delete(id); else this.pinnedOpen.add(id);
+          setShared("agentsQuota.open", [...this.pinnedOpen]);
+          cx.notify();
+        },
+        pick: (id, label, cx) => {
+          if (this.pinnedPicked[id] === label) delete this.pinnedPicked[id]; else this.pinnedPicked[id] = label;
+          setShared("agentsQuota.headline", this.pinnedPicked);
+          cx.notify();
+        },
       }) ?? div()))
       .when(collapsed, (el) =>
         el.child(

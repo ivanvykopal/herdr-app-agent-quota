@@ -28,13 +28,13 @@ export function availableSubscriptions(q, registry = SUBSCRIPTIONS) {
   return registry.map((s) => ({ ...s, data: s.card(q) })).filter((s) => s.data?.windows?.length);
 }
 
-// What the footer shows. Subscriptions with a running agent come first (registry order within each
-// group); at most `limit` are shown unless `open`. -> { shown, hidden, collapsible }.
-export function layoutSubscriptions(items, active, open, limit) {
+// Subscriptions with a running agent come first (registry order within each group).
+export function orderSubscriptions(items, active) {
   const live = items.filter((s) => s.providers.some((p) => active.has(p)));
-  const rest = items.filter((s) => !live.includes(s));
-  const ordered = [...live, ...rest];
-  const collapsible = ordered.length > limit;
-  const shown = open || !collapsible ? ordered : ordered.slice(0, limit);
-  return { shown, hidden: ordered.length - shown.length, collapsible };
+  return [...live, ...items.filter((s) => !live.includes(s))];
+}
+
+// The user's picks for the status bar: `ids` is an array of subscription ids, or null for all of them.
+export function pickSubscriptions(items, ids) {
+  return ids ? items.filter((s) => ids.includes(s.id)) : items;
 }

@@ -14,7 +14,7 @@ import { parseReports } from "./reports.js";
 import { sessionDirFor, newestTranscript, activeModel, ompTitle, providerOfModel } from "./omp-session.js";
 import { claudeProjectDir, lastClaudeModel, claudeProvider, claudeTitle } from "./claude-session.js";
 import { assignTranscripts } from "./assign.js";
-import { availableSubscriptions, layoutSubscriptions } from "./subscriptions.js";
+import { availableSubscriptions, orderSubscriptions } from "./subscriptions.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
 import { blockedReason, reasonText } from "./blocked.js";
 
@@ -386,58 +386,124 @@ export function quotaBlock(t, info, used) {
   return rows.length ? v_flex().flex_none().pl(33).pr(8).pb(4).gap(1).children(rows) : null;
 }
 
-// Footer: pinned subscriptions (see subscriptions.js). More than this many collapse behind "+N more".
-export const PINNED_VISIBLE = 3;
-const SHORT = { Fable: "Fbl" };
+// Footer: one row per subscription (see subscriptions.js), styled after Over9k's usage block: icon, name,
+// the headline limit's % and its reset time, a chevron. A click opens every limit as a bar; a click on a
+// limit pins it as the row's headline (again to unpin). Credits (Cr) show their money, not a percent.
+const ROW = 28, LIMIT = 20, FOOTER_MAX = 180;
 
-function pill(t, w, used, now, stale) {
-  const label = SHORT[w.label] ?? w.label;
-  const expired = w.resets !== null && w.resets <= now;
-  let color = t.ansi2;
-  if (expired || stale) color = t.dim;
-  else if (w.remaining < 15) color = t.ansi1;
-  else if (w.remaining < 40) color = t.ansi3;
-  let text = `${Math.round(used ? w.used : w.remaining)}%`;
-  if (w.label === "Cr" && w.tail) text = w.tail; // credits: the money left says more than a percent
-  if (expired) text = "n/a";
-  return h_flex().flex_none().items_center().gap(3)
-    .child(div().text_size(10).text_color(t.dim).child(label))
-    .child(div().text_size(10.5).font_semibold().text_color(color).child(text));
+// Severity by % USED, as Over9k does: red from 80, yellow from 50.
+const severity = (t, used) => (used >= 80 ? t.ansi1 : used >= 50 ? t.ansi3 : t.ansi2);
+
+// The limit the collapsed row shows: the pinned one, else the fullest that hasn't reset.
+function headline(windows, picked, now) {
+  const pct = windows.filter((w) => w.label !== "Cr");
+  return pct.find((w) => w.label === picked)
+    ?? pct.filter((w) => w.resets === null || w.resets > now).reduce((a, b) => (!a || b.used > a.used ? b : a), null)
+    ?? pct[0] ?? null;
 }
 
-function subscriptionRow(t, s, used, now) {
+function limitRow(t, s, w, pinned, ui, now, stale) {
+  const expired = w.resets !== null && w.resets <= now;
+  const used = expired ? 0 : Math.max(0, Math.min(100, w.used));
+  const color = expired || stale ? t.dim : severity(t, used);
+  const credits = w.label === "Cr";
+  const row = h_flex().id(`limit-${s.id}-${w.label}`).h(LIMIT).items_center().gap(7).text_size(11.5).rounded(4)
+    .child(div().w(44).flex_none().truncate().text_color(pinned ? t.accent : t.muted).child(w.label));
+  if (credits) {
+    return row.child(div().flex_1().flex().justify_end().text_color(t.foreground).child(w.tail ?? ""));
+  }
+  return row.cursor_pointer().hover((x) => x.bg(t.hover))
+    .on_click((_e, cx) => ui.pick(s.id, w.label, cx))
+    .tooltip(pinned ? "Unpin as headline number" : "Pin as headline number")
+    .child(div().flex_1().h(3).rounded(2).bg(t.raised)
+      .child(div().h(3).rounded(2).bg(color).w(`${Math.max(used > 0 ? 3 : 0, used)}%`)))
+    .child(div().w(30).flex_none().flex().justify_end().text_color(color).child(expired ? "n/a" : `${Math.round(used)}%`))
+    .child(div().w(44).flex_none().flex().justify_end().text_size(10.5).text_color(t.dim)
+      .child(w.resets === null ? "" : expired ? "reset" : until(w.resets)));
+}
+
+function subscriptionRow(t, s, i, ui, now) {
   const card = s.data;
   const stale = card.fetched !== null && now - card.fetched > STALE_S;
+  const open = ui.open.has(s.id);
+  const picked = ui.picked[s.id];
+  const top = headline(card.windows, picked, now);
+  const expired = top && top.resets !== null && top.resets <= now;
+  const used = top ? (expired ? 0 : Math.max(0, Math.min(100, top.used))) : 0;
   const resets = card.windows
     .filter((w) => w.resets !== null)
     .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
     .join(" · ");
   const file = `icons/${s.icon}.svg`;
   const pic = s.tint ? svg(file).size(12).flex_none().text_color(t.muted) : image(file).w(12).h(12).flex_none();
-  return h_flex().id(`pinned-${s.id}`).h(16).flex_none().items_center().gap(8)
+  const color = expired || stale ? t.dim : severity(t, used);
+  const head = h_flex().id(`pinned-${s.id}`).h(ROW).px(4).gap(6).items_center().rounded(6).cursor_pointer()
+    .hover((x) => x.bg(t.hover))
+    .on_click((_e, cx) => ui.toggle(s.id, cx))
     .tooltip(`${s.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
     .child(pic)
-    .children(card.windows.map((w) => pill(t, w, used, now, stale)));
+    .child(div().min_w(0).flex_shrink(1).truncate().text_color(t.muted).child(s.name))
+    .child(h_flex().flex_1().min_w(0).justify_end().overflow_hidden()
+      .when(Boolean(top) && !open && top.resets !== null && !expired, (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(until(top.resets)))))
+    .when(Boolean(top) && !open, (el) => el.child(div().w(32).flex_none().flex().justify_end().text_color(color)
+      .child(expired ? "n/a" : `${Math.round(used)}%`)))
+    .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(8).flex_none().text_color(t.dim));
+  const limits = [...card.windows].sort((a, b) => (b.label === picked) - (a.label === picked));
+  return v_flex().w_full()
+    .when(i > 0, (el) => el.border_t(1).border_color(t.border))
+    .child(head)
+    .when(open, (el) => el.child(v_flex().px(4).pb(4)
+      .children(limits.map((w) => limitRow(t, s, w, w.label === picked, ui, now, stale)))));
 }
 
-// A tight footer, one line per subscription that has data: "icon  5h 87%  7d 80%  Fbl 78%". Hover for
-// resets. Subscriptions with a running agent come first. Past PINNED_VISIBLE the rest hide behind a
-// "+N more" row; opened, the list simply grows to show every row (no scrolling, nothing clipped).
-// `ui` = { active: Set of provider ids with a running agent, open, toggle(e, cx) }. null when no
-// subscription has data.
+// `ui` = { active: Set of provider ids with a running agent, open: Set of subscription ids,
+// picked: { id: window label }, toggle(id, cx), pick(id, label, cx) }. Subscriptions with a running agent
+// come first. null when no subscription has data.
 export function summaryFooter(t, q, ui) {
   const now = Date.now() / 1000;
-  const { shown, hidden, collapsible } = layoutSubscriptions(availableSubscriptions(q), ui.active, ui.open, PINNED_VISIBLE);
+  const shown = orderSubscriptions(availableSubscriptions(q), ui.active);
   if (!shown.length) return null;
-  const list = v_flex().id("pinned-list").gap(2)
-    .children(shown.map((s) => subscriptionRow(t, s, q.used, now)));
-  const toggle = h_flex().id("pinned-toggle").h(14).flex_none().items_center().gap(4)
-    .text_size(10).text_color(t.dim).cursor_pointer()
-    .hover((e) => e.text_color(t.foreground))
-    .on_click(ui.toggle)
-    .child(svg(`mods/workspace-chrome/chevron-${ui.open ? "down" : "right"}.svg`).size(10).flex_none())
-    .child(div().child(ui.open ? "less" : `+${hidden} more`));
-  return v_flex().flex_none().px(16).py(6).gap(2).border_t(1).border_color(t.border)
-    .child(list)
-    .when(collapsible, (e) => e.child(toggle));
+  // Capped so a long list or several open rows never squeeze the agents list; it scrolls instead.
+  return v_flex().flex_none().w_full().border_t(1).border_color(t.border)
+    .child(v_flex().id("pinned-list").w_full().max_h(FOOTER_MAX).pt(3).px(10).text_size(12.5).overflow_y_scrollbar()
+      .children(shown.map((s, i) => subscriptionRow(t, s, i, ui, now))));
+}
+
+// Status bar strip: per selected subscription its icon and one pill per limit, "5h 86%  7d 81%  Fbl 78%",
+// as % REMAINING (red under 15%, yellow under 40%). Hover for reset times. Returns null when nothing is
+// selected or has data. `items` come from availableSubscriptions + pickSubscriptions.
+const SHORT = { Fable: "Fbl" };
+
+function pill(t, w, now, stale) {
+  const expired = w.resets !== null && w.resets <= now;
+  let color = t.ansi2;
+  if (expired || stale) color = t.dim;
+  else if (w.remaining < 15) color = t.ansi1;
+  else if (w.remaining < 40) color = t.ansi3;
+  let text = `${Math.round(w.remaining)}%`;
+  if (w.label === "Cr" && w.tail) text = w.tail; // credits: the money left says more than a percent
+  if (expired) text = "n/a";
+  return h_flex().flex_none().items_center().gap(3)
+    .child(div().text_size(10).text_color(t.dim).child(SHORT[w.label] ?? w.label))
+    .child(div().text_size(10.5).font_semibold().text_color(color).child(text));
+}
+
+export function statusStrip(t, items) {
+  if (!items.length) return null;
+  const now = Date.now() / 1000;
+  return h_flex().flex_none().items_center().gap(14)
+    .children(items.map((s) => {
+      const card = s.data;
+      const stale = card.fetched !== null && now - card.fetched > STALE_S;
+      const resets = card.windows
+        .filter((w) => w.resets !== null)
+        .map((w) => `${w.label} ${w.resets <= now ? "reset" : `resets in ${until(w.resets)}`}`)
+        .join(" · ");
+      const file = `icons/${s.icon}.svg`;
+      const pic = s.tint ? svg(file).size(12).flex_none().text_color(t.muted) : image(file).w(12).h(12).flex_none();
+      return h_flex().id(`status-${s.id}`).flex_none().items_center().gap(7)
+        .tooltip(`${s.name}${resets ? ` · ${resets}` : ""}${stale ? " · data older than 30 min" : ""}`)
+        .child(pic)
+        .children(card.windows.map((w) => pill(t, w, now, stale)));
+    }));
 }

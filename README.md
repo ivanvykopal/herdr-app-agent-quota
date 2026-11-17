@@ -6,8 +6,8 @@ under the agent in the Agents list.
 
 ![Agents with their model and quota, and the pinned subscriptions footer](preview.png)
 
-*Per-agent model and quota (top: a subscription model with limits, an API model with none) and the pinned
-subscriptions footer (bottom: Claude Code, Codex, Command Code). The empty space between them is cropped.*
+*Per-agent model and quota (top: a subscription model with limits, an API model with none). The
+subscriptions footer in this older shot has since been redesigned, see below.*
 
 - **Follows the active model.** A Claude Code or omp agent running a subscription model shows live
   limits. The same agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...) shows
@@ -23,10 +23,23 @@ subscriptions footer (bottom: Claude Code, Codex, Command Code). The empty space
   context is (**% used**, plus the token count), for subscription and API models alike. Sizes come from
   `omp models --json`; for a Claude Code gateway model (not `claude-*`) the percent Claude Code itself
   measured is used if the plugin recorded it, otherwise only the token count is shown.
-- **Pinned subscriptions footer:** a tight strip at the bottom of the panel always shows your Claude Code
-  (`5h`, `7d`, `Fbl`), Codex (`30d`) and Command Code (`5h`, `7d`, credits `Cr $…`) limits, whether or not
-  an agent is running. Hover a line for reset times. Subscriptions with a running agent come first. With
-  more than 3, the rest collapse behind a `+N more` row that expands the list (no scrolling).
+- **Pinned subscriptions footer** (bottom of the Agents panel), styled after Over9k's usage block: one row
+  per subscription (Claude Code, Codex, Command Code) with its fullest limit's **% used** and reset time,
+  whether or not an agent is running; subscriptions with a running agent come first. Click a row to open
+  every limit (`5h`, `7d`, `Fable`, `Cr` credits) as a bar; click a limit to pin it as the row's headline
+  (click again to unpin). Red from 80% used, yellow from 50%. Hover a row for reset times. The footer is
+  capped at 180 px and scrolls if there are more rows than fit.
+
+  ![Pinned subscriptions footer](screenshots/footer.png)
+
+- **Status bar summary** (optional, bottom of the window): next to *This computer*, the branch and the
+  agent count, a compact strip with each selected subscription's icon and its limits as **% remaining**
+  (`5h 96%  7d 80%  Fbl 78%`, credits as `Cr $10.00`). Red under 15% left, yellow under 40%, `n/a` once a
+  window has reset. Hover for reset times. Click the strip to choose which subscriptions are shown (all
+  by default). It is independent of the Agents panel footer.
+
+  ![Status bar with subscription limits](screenshots/status-bar.png)
+
 - **Adding a subscription** is data, not UI code: add its provider to `LABELS` in `reports.js` (live data
   from `omp usage --json`; skip for cache-only providers) and one entry to `SUBSCRIPTIONS` in
   `subscriptions.js` (name, icon, which card to use). It then appears in the footer by itself.
@@ -71,6 +84,13 @@ herdr-app do layout.clone '{"name":"main","as":"main-quota"}'
 then in `~/.config/herdr-app/layouts/main-quota.json` set the agents block to
 `"content": { "mod": "agents-quota" }`. `ctrl-shift-l` switches layouts.
 
+To also get the subscription limits in the window's bottom bar, point the `status` block at the same mod
+(it replaces Herdr's `workspace-status` and keeps everything it showed):
+
+```json
+{ "id": "status", "type": "block", "content": { "mod": "agents-quota", "props": { "status": true } }, "size": { "px": 28 } }
+```
+
 ## What it runs and reads (review before installing)
 
 Mods are trusted code. This one:
@@ -85,7 +105,8 @@ Mods are trusted code. This one:
   `on`): `sh` to read the home folder, list transcripts with `ls -t` / `stat`, read the first 4 KiB and last
   1 MB of the newest ones with `head` / `tail`, and `omp usage --json` once a minute per machine; nothing is
   copied off the machine except those few lines' worth of model, title and token numbers;
-- makes no network calls of its own and writes no files.
+- makes no network calls of its own and writes no files; it only remembers your footer and status-bar
+  choices (open rows, pinned limits, selected subscriptions) in the app's own shared state.
 
 ## Limits
 
