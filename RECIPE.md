@@ -20,11 +20,12 @@ The shipped Agents panel (header "Agents", sort button, groups such as Working /
    a gauge filled to the context window **used** (always used, not remaining, like the agents' own
    footers), percent, and a tail with the token count (`353k`, `1.2M`). Red past 85% used, yellow past
    60%. When only a token count is known (no window), the line reads `<n> tokens` in `muted`.
-3. **One gauge line per limit**, only when the agent's model is NOT known but its program has a
-   subscription (Codex): a 32px label (`5h`, `7d`, `Fable`, `30d`, `Cr`) in 10.5px `dim`; a 3px-tall
-   rounded track (`raised`) filled to the shown percent; a 30px percent in 10.5px `muted`; a 38px tail in
-   10px `dim` (time to reset like `1h08`, `2d`; for `Cr` the dollars left like `$10.00`). An agent with a
-   known model never shows limit lines: the footer and status bar already show them.
+3. **One gauge line per limit**, only where nothing else shows them: an agent whose model the mod can't
+   read (a program without a transcript reader, but with a subscription) or one on another machine: a
+   32px label (`5h`, `7d`, `Fable`, `30d`, `Cr`) in 10.5px `dim`; a 3px-tall rounded track (`raised`)
+   filled to the shown percent; a 30px percent in 10.5px `muted`; a 38px tail in 10px `dim` (time to reset
+   like `1h08`, `2d`; for `Cr` the dollars left like `$10.00`). omp, Claude Code, Command Code and Codex
+   agents on this computer never show limit lines: the footer and status bar already show them.
 4. Nothing at all when the model isn't known yet or the agent has no folder under the home folder.
 5. **Pinned footer**, below the agent list and above the sidebar footer, hidden in the narrow rail: a 1px
    `border` top line, 16px side padding, 6px vertical, 2px between lines. One 16px line per subscription
@@ -60,13 +61,14 @@ Fill colour follows what is left, whichever number is shown: `ansi1` (red) under
 ## Built from
 
 A clone of the shipped `agents` mod (`herdr-app do mod.clone '{"name":"agents","as":"agents-quota"}'`,
-version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus nine modules:
+version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus ten modules:
 
 - `quota.js`: `loadQuota(prev, targets)` (targets: `{ kind, cwd, address, status }` per omp / Claude Code / Command Code
   agent) returns `{ live, cache, contexts, used, liveAt, windows, windowsAt, fileCache, models }` (`models`
   is keyed by agent address, entries `{ model, tokens, sessionId, status, at }`); `agentQuota(q, agent)`
-  returns `{ model, card, note, context }` or null; `quotaBlock(t, info, used)` draws it; `modelKind(agent)`
-  is `"omp"`, `"claude"`, `"commandcode"` (program key `command-code`) or null. Per folder group it lists
+  returns `{ model, card, note, context, limits }` or null (`limits`: draw the card's lines under the row);
+  `quotaBlock(t, info, used)` draws it; `modelKind(agent)`
+  is `"omp"`, `"claude"`, `"commandcode"` (program key `command-code`), `"codex"` or null. Per folder group it lists
   the newest 8 transcripts (`*.checkpoints.jsonl` excluded) with their write times
   (`powershell Get-ChildItem` on Windows, `ls -t` + `stat` elsewhere), reads each once per (file, mtime),
   asks `hc get --json <address>` for the agent's `created_ms`, `status_ms` and title, then calls
@@ -82,6 +84,13 @@ version 0.1.16) with `mod.json` `{"place":"none","title":"Agents"}`, plus nine m
   `model_change` records, e.g. `recursive/flint-v1.0:free`); `commandcodeLastTokens(text)` is the last
   assistant line's `usage.inputTokens` (cache reads included; what Command Code's compaction measures).
   Window: catalog key `commandcode/<model>`. Every Command Code model gets the Command Code card. Local only.
+- `codex-session.js`: Codex files are `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (by date; old ones
+  become `.jsonl.zst`, not read), so the spec lists the 24 newest `*.jsonl` recursively and keeps those whose
+  first line (`session_meta`) `payload.cwd` is the agent's folder (`sameFolder`: slashes, trailing slash,
+  case). `codexState(text)`: model from the last `turn_context` `payload.model`; tokens from the last
+  `token_count` `payload.info.last_token_usage.total_tokens`; percent as Codex's footer computes it,
+  `(tokens - 12000) / (model_context_window - 12000)`, passed as the context percent (no catalog). Card:
+  the plugin's `codex` cache (feeds the footer); no `no subscription quota` note without it. Local only.
 - `context.js`: `ompLastTokens(text)` (assistant `contextSnapshot.promptTokens`, else usage totals),
   `claudeLastTokens(text)` (last assistant `usage`: input + cache read + cache creation tokens),
   `parseModelCatalog(json)` (`provider/id` -> `contextWindow`), `catalogWindow(map, model)` (also tries
@@ -178,7 +187,8 @@ elsewhere; `fs/promises` `readdir`/`readFile` of transcripts and of
 - A `commandcode` agent (with the hook) shows its model as in its transcript (`recursive/flint-v1.0:free`),
   then `ctx` with the last `usage.inputTokens` over the catalog window (25,519 / 262,144 -> `10%  26k`),
   and no limit lines.
-- A Codex agent (model not read) still shows the Codex limit lines under its row; an agent on another
+- A Codex agent shows its model (`gpt-5.6-terra`) and a `ctx` percent equal to its own footer's
+  `Context N% used` (22,502 tokens of 258,400 -> `4%  22k`), and no limit lines. An agent on another
   machine still shows its machine's limits (nothing else shows them).
 - Collapsing the sidebar to the rail hides all quota lines; expanding brings them back.
 - With no agent running, the pinned footer still shows the Claude Code and Codex lines from live /

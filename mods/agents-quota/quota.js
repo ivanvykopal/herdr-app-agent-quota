@@ -14,6 +14,7 @@ import { parseReports } from "./reports.js";
 import { sessionDirFor, newestTranscript, activeModel, ompTitle, providerOfModel } from "./omp-session.js";
 import { claudeProjectDir, lastClaudeModel, claudeProvider, claudeTitle } from "./claude-session.js";
 import { commandcodeProjectDir, lastCommandcodeModel, commandcodeLastTokens } from "./commandcode-session.js";
+import { codexCwd, codexState, sameFolder } from "./codex-session.js";
 import { assignTranscripts } from "./assign.js";
 import { availableSubscriptions, orderSubscriptions } from "./subscriptions.js";
 import { ompLastTokens, claudeLastTokens, parseModelCatalog, catalogWindow, contextOf, fmtTokens } from "./context.js";
@@ -102,16 +103,20 @@ async function loadCache() {
 }
 
 // Transcripts of a folder, newest write first, with their last write time (ms) as the OS knows it:
-// [{ file, mtimeMs }]. Names alone can't say which agent is still writing. Empty if the OS can't tell.
+// [{ file, mtimeMs }], `file` relative to `dir` (with `recursive`, it can be `2026/11/17/x.jsonl`). Names
+// alone can't say which agent is still writing. Empty if the OS can't tell.
 // `machine` null = this computer; else that machine, through the core (assumed Unix).
 const MAX_CANDIDATES = 8;
-const LIST_SH = 'for f in $(ls -t "$1"/*.jsonl 2>/dev/null | grep -v "\\.checkpoints\\.jsonl$" | head -n "$2"); do echo "$(basename "$f")|$(( $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") * 1000 ))"; done';
-async function listTranscripts(dir, machine) {
+const MTIME_SH = '$(( $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f") * 1000 ))';
+const LIST_SH = `for f in $(ls -t "$1"/*.jsonl 2>/dev/null | grep -v "\\.checkpoints\\.jsonl$" | head -n "$2"); do echo "$(basename "$f")|${MTIME_SH}"; done`;
+const LIST_SH_R = `for f in $(find "$1" -type f -name "*.jsonl" 2>/dev/null | xargs ls -t 2>/dev/null | head -n "$2"); do echo "\${f#$1/}|${MTIME_SH}"; done`;
+async function listTranscripts(dir, machine, { recursive = false, max = MAX_CANDIDATES } = {}) {
   let r;
-  if (machine) r = await exec("sh", ["-c", LIST_SH, "sh", dir, String(MAX_CANDIDATES)], { on: machine, timeout: 30000 });
+  const sh = recursive ? LIST_SH_R : LIST_SH;
+  if (machine) r = await exec("sh", ["-c", sh, "sh", dir, String(max)], { on: machine, timeout: 30000 });
   else if (/^[A-Za-z]:/.test(home())) {
-    r = await exec("powershell", ["-NoProfile", "-Command", `Get-ChildItem -LiteralPath '${dir.replace(/'/g, "''")}' -Filter *.jsonl -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.checkpoints.jsonl' } | Sort-Object LastWriteTime -Descending | Select-Object -First ${MAX_CANDIDATES} | ForEach-Object { $_.Name + '|' + [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() }`], { timeout: 10000 });
-  } else r = await exec("sh", ["-c", LIST_SH, "sh", dir, String(MAX_CANDIDATES)], { timeout: 10000 });
+    r = await exec("powershell", ["-NoProfile", "-Command", `$root = (Get-Item -LiteralPath '${dir.replace(/'/g, "''")}' -ErrorAction SilentlyContinue).FullName; if ($root) { $root = $root.TrimEnd('\\'); Get-ChildItem -LiteralPath $root -Filter *.jsonl -File${recursive ? " -Recurse" : ""} -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.jsonl' -and $_.Name -notlike '*.checkpoints.jsonl' } | Sort-Object LastWriteTime -Descending | Select-Object -First ${max} | ForEach-Object { $_.FullName.Substring($root.Length + 1).Replace('\\', '/') + '|' + [DateTimeOffset]::new($_.LastWriteTime).ToUnixTimeMilliseconds() } }`], { timeout: 10000 });
+  } else r = await exec("sh", ["-c", sh, "sh", dir, String(max)], { timeout: 10000 });
   if (r.code !== 0) return [];
   return r.stdout.split(/\r?\n/)
     .map((l) => l.trim().split("|"))
@@ -132,9 +137,10 @@ async function homeOf(machine, homes) {
   return h;
 }
 
-// What differs between omp, Claude Code and Command Code: where transcripts live (under the machine's
-// `h`ome; `root` may be async) and how to read one. Command Code's folder needs a directory listing,
-// so it is found on this computer only (the status hook that lists it as an agent is Windows-only).
+// What differs between the agents: where transcripts live (under the machine's `h`ome; `root` may be
+// async) and how to read one. Command Code's folder needs a directory listing, so it is found on this
+// computer only (the status hook that lists it as an agent is Windows-only). Codex files sit by date, not
+// by folder: `list` searches all of them and `cwd` (from each file) keeps those of the agent's folder.
 const tailOf = (text) => text.slice(-TAIL_CHARS);
 const SPECS = {
   omp: {
@@ -152,6 +158,11 @@ const SPECS = {
       try { const d = commandcodeProjectDir(await fs.readdir(base), cwd); return d ? `${base}/${d}` : null; } catch { return null; }
     },
     read: (text) => ({ title: null, model: lastCommandcodeModel(tailOf(text)), tokens: commandcodeLastTokens(tailOf(text)), sessionId: null }),
+  },
+  codex: {
+    root: (_cwd, h, machine) => (machine ? null : `${h.replace(/\\/g, "/")}/.codex/sessions`),
+    list: { recursive: true, max: 24 },
+    read: (text) => ({ title: null, cwd: codexCwd(text), ...codexState(tailOf(text)), sessionId: null }),
   },
 };
 
@@ -184,15 +195,15 @@ async function readTranscript(spec, root, cand, cache, machine) {
     info = spec.read(machine ? await readRemote(path, machine) : await fs.readFile(path, "utf8"), cand.file);
   } catch { /* unreadable: no info */ }
   cache.set(key, info);
-  if (cache.size > 40) cache.delete(cache.keys().next().value); // oldest first
+  if (cache.size > 80) cache.delete(cache.keys().next().value); // oldest first
   return info;
 }
 
 // Works out which transcript each agent of one group (same machine, kind and folder) is writing, and reads
-// its model and context. -> Map(address -> { model, tokens, sessionId }). Agents with no transcript of
-// their own get nothing rather than another agent's.
+// its model and context. -> Map(address -> { model, tokens, pct, sessionId }). Agents with no transcript
+// of their own get nothing rather than another agent's.
 async function resolveGroup(kind, cwd, machine, members, cache, homes) {
-  const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, sessionId: null }]));
+  const out = new Map(members.map((m) => [m.address, { model: null, tokens: null, pct: null, sessionId: null }]));
   const spec = SPECS[kind];
   const h = await homeOf(machine, homes);
   const root = h ? await spec.root(cwd, h, machine) : null;
@@ -200,12 +211,14 @@ async function resolveGroup(kind, cwd, machine, members, cache, homes) {
   const metas = [];
   for (const m of members) metas.push(await agentMeta(m.address));
   let cands = [];
-  try { cands = await listTranscripts(root, machine); } catch { /* fall through to the name order */ }
+  try { cands = await listTranscripts(root, machine, spec.list); } catch { /* fall through to the name order */ }
   if (!cands.length && kind === "omp" && !machine) { // no file times: omp names sort by start time
     try { const f = newestTranscript(await fs.readdir(root)); if (f) cands = [{ file: f, mtimeMs: Date.now() }]; } catch { /* none */ }
   }
   const infos = new Map();
   for (const c of cands) infos.set(c.file, await readTranscript(spec, root, c, cache, machine));
+  // A spec whose files aren't kept by folder says each file's folder: only this group's count.
+  if (spec.list) cands = cands.filter((c) => sameFolder(infos.get(c.file)?.cwd, cwd));
   const assigned = assignTranscripts(
     members.map((m, i) => ({ id: m.address, working: m.status === "working", statusMs: metas[i].statusMs ?? null, createdMs: metas[i].createdMs ?? null, paneTitle: metas[i].title ?? "" })),
     cands.map((c) => ({ file: c.file, mtimeMs: c.mtimeMs, title: infos.get(c.file)?.title ?? "" })),
@@ -214,7 +227,7 @@ async function resolveGroup(kind, cwd, machine, members, cache, homes) {
   for (const m of members) {
     const c = assigned.get(m.address);
     const info = c ? infos.get(c.file) : null;
-    if (info) out.set(m.address, { model: info.model, tokens: info.tokens, sessionId: info.sessionId });
+    if (info) out.set(m.address, { model: info.model, tokens: info.tokens, pct: info.pct ?? null, sessionId: info.sessionId });
   }
   return out;
 }
@@ -224,13 +237,14 @@ export const modelKind = (agent) => {
   const k = agent.program?.key ?? agent.app;
   if (k === "omp") return "omp";
   if (k === "command-code" || k === "commandcode") return "commandcode";
+  if (k === "codex") return "codex";
   return k === "claude" || k === "claude-code" ? "claude" : null;
 };
 
 // -> { live, liveRemote: Map<machine, { cards, at }>, cache, contexts, used, liveAt, windows, windowsAt,
 // fileCache, homes, models: Map<agent address, {model, tokens, sessionId, status, at}> }. `prev` is the last
 // result, so live readings, the model catalog and transcript lookups are reused between asks; `targets` are
-// { kind, cwd, address, status } of the omp / Claude Code agents on screen, on this computer or another
+// { kind, cwd, address, status } of the omp / Claude Code / Command Code / Codex agents on screen, on this computer or another
 // machine (address `machine/t7`). Agents sharing a folder are told apart (see assign.js).
 export async function loadQuota(prev, targets = []) {
   let live = prev?.live ?? new Map();
@@ -292,8 +306,9 @@ export function agentQuota(q, agent) {
   if (kind) {
     const entry = q.models.get(agent.address);
     const model = entry?.model ?? null;
-    // Command Code bills every model it serves (its own ids, e.g. `recursive/flint-v1.0:free`) to its plan.
-    const provider = kind === "claude" ? claudeProvider(model) : kind === "commandcode" ? "commandcode" : providerOfModel(model);
+    // Command Code bills every model it serves (its own ids, e.g. `recursive/flint-v1.0:free`) to its plan;
+    // Codex runs on the ChatGPT plan (or an API key, which the rollout doesn't tell apart).
+    const provider = kind === "claude" ? claudeProvider(model) : kind === "commandcode" ? "commandcode" : kind === "codex" ? "openai-codex" : providerOfModel(model);
     let card = null;
     if (provider === "anthropic") card = live.get("anthropic") ?? cache.get("claude") ?? null;
     else if (provider === "commandcode") card = live.get("commandcode") ?? null;
@@ -301,21 +316,25 @@ export function agentQuota(q, agent) {
     // Window: omp names models "provider/id", the catalog's keys; Command Code's ids are the catalog's
     // `commandcode/<id>`. Claude Code's `claude-*` ids are Anthropic's; any other model there (a gateway)
     // has no catalog entry we can trust, so only the percent Claude Code itself measured (the plugin's
-    // per-session cache) is used.
+    // per-session cache) is used. Codex reports its window itself, and its percent (`entry.pct`) is computed
+    // as Codex's footer does.
     const window = kind === "omp" ? catalogWindow(q.windows, model)
       : kind === "commandcode" ? catalogWindow(q.windows, model ? `commandcode/${model}` : null)
+      : kind === "codex" ? null
       : catalogWindow(q.windows, provider ? `anthropic/${model}` : null);
-    const context = contextOf({ tokens: entry?.tokens ?? null, window, cachedPct: machine ? null : (q.contexts.get(entry?.sessionId) ?? null) });
+    const cachedPct = kind === "codex" ? (entry?.pct ?? null) : machine ? null : (q.contexts.get(entry?.sessionId) ?? null);
+    const context = contextOf({ tokens: entry?.tokens ?? null, window, cachedPct });
     if (!model && !card && !context) return null;
     let note = null;
-    if (!card) note = machine && provider ? `quota not read on ${machine}` : "no subscription quota";
-    return { model, card, note, context, remote: Boolean(machine) };
+    // Codex's limits come only from the optional plugin: without it they're unknown, not absent.
+    if (!card && kind !== "codex") note = machine && provider ? `quota not read on ${machine}` : "no subscription quota";
+    return { model, card, note, context, limits: Boolean(machine) };
   }
   if (machine) return null;
   const raw = agent.program?.key ?? agent.app;
   const key = ALIAS[raw] ?? raw;
   const card = q.live.get(key) ?? q.cache.get(key) ?? null;
-  return card ? { model: null, card, note: null, context: null } : null;
+  return card ? { model: null, card, note: null, context: null, limits: true } : null;
 }
 
 function until(unix) {
@@ -389,10 +408,10 @@ export function quotaBlock(t, info, used) {
   const rows = [];
   if (info.model !== null || info.note) rows.push(modelLine(t, info.model, info.note));
   if (info.context) rows.push(contextLine(t, info.context));
-  // Limits under an agent only where nothing else shows them: an agent whose model isn't known (Codex, by
-  // its program), or one on another machine (its machine's own logins; the footer and status bar are
-  // this computer's). Otherwise the row keeps to model and context.
-  const card = info.model === null || info.remote ? info.card : null;
+  // Limits under an agent only where nothing else shows them (`limits`): an agent whose model the mod can't
+  // read (a program without a transcript reader), or one on another machine (its machine's own logins; the
+  // footer and status bar are this computer's). Otherwise the row keeps to model and context.
+  const card = info.limits ? info.card : null;
   if (card) {
     const stale = card.fetched !== null && now - card.fetched > STALE_S;
     const show = (w) => (used ? w.used : w.remaining);

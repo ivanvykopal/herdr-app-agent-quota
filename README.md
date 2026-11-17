@@ -9,11 +9,11 @@ model and context use directly under the agent in the Agents list, and your subs
 *An agent with its model and context gauge (`ctx`), and the subscriptions footer below it. The empty space
 between them is cropped.*
 
-- **Follows the active model.** Under a Claude Code, omp or Command Code agent: its model and how full its
-  context is. An agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...) also says
-  `no subscription quota`, because no subscription's limits apply to it. The limits themselves live in
-  the footer and status bar, not under each agent; only an agent whose model isn't known (Codex, by its
-  program) still shows its subscription's limits under its row.
+- **Follows the active model.** Under a Claude Code, omp, Command Code or Codex agent: its model and how
+  full its context is. An agent on an API or gateway model (a cluster, LM Studio, `glm-*`, `kimi-*`, ...)
+  also says `no subscription quota`, because no subscription's limits apply to it. The limits themselves
+  live in the footer and status bar, not under each agent; only an agent whose model the mod can't read
+  (another program with a subscription) still shows that subscription's limits under its row.
 - **Live numbers** come from [`omp usage --json`](https://github.com/can1357/oh-my-pi): Anthropic 5h, 7d
   and the separate 7d **Fable** limit, and Command Code 5h, 7d and credit balance.
 - Limit gauges turn red under 15% left and yellow under 40%; a window whose reset has passed shows `n/a`.
@@ -21,11 +21,12 @@ between them is cropped.*
   is waiting for, e.g. `Permission · Run: rm -rf build/ ?` or `Question · Which database?`, in the blocked
   colour. It uses the agent's own status report (OSC 7501 `kind` and `msg`), never the screen, so an agent
   that doesn't send them shows only `Waiting for you`.
-- **Context window per agent:** a `ctx` gauge under each omp, Claude Code and Command Code agent shows how
-  full its context is (**% used**, plus the token count), for subscription and API models alike. Sizes come
-  from `omp models --json` (Command Code models as `commandcode/<id>`); for a Claude Code gateway model (not
-  `claude-*`) the percent Claude Code itself measured is used if the plugin recorded it, otherwise only the
-  token count is shown.
+- **Context window per agent:** a `ctx` gauge under each omp, Claude Code, Command Code and Codex agent
+  shows how full its context is (**% used**, plus the token count), for subscription and API models alike.
+  Sizes come from `omp models --json` (Command Code models as `commandcode/<id>`); Codex reports its own
+  window, and its percent is worked out as Codex's footer does (`Context N% used`, leaving out a 12k-token
+  baseline). For a Claude Code gateway model (not `claude-*`) the percent Claude Code itself measured is
+  used if the plugin recorded it, otherwise only the token count is shown.
 - **Pinned subscriptions footer** (bottom of the Agents panel), styled after Over9k's usage block: one row
   per subscription (Claude Code, Codex, Command Code) with its fullest limit's **% used** and reset time,
   whether or not an agent is running; subscriptions with a running agent come first. Click a row to open
@@ -54,7 +55,7 @@ between them is cropped.*
 | omp, `anthropic/...` | model, `ctx` | Claude Code (live) |
 | omp, `commandcode/...`; the `commandcode` CLI (Windows, needs the hook below) | model, `ctx` | Command Code (5h, 7d, credits `Cr`, live) |
 | omp, `openai-codex/...` | model, `ctx` | Codex, from the optional plugin cache (see below) |
-| Codex | Codex limits (its model isn't read) | Codex |
+| Codex | model, `ctx` | Codex, from the optional plugin cache |
 | omp, any other provider | model, `ctx`, `no subscription quota` | nothing |
 | model not known yet, or a folder outside your home | nothing | |
 
@@ -112,11 +113,12 @@ Mods are trusted code. This one:
 
 - runs `omp usage --json` once a minute (omp contacts the Anthropic / Command Code usage endpoints
   itself, and caches for ~5 min);
-- runs `powershell` (Windows) or `sh` + `ls` (macOS / Linux) every ~30 s per Claude Code / omp / Command Code agent to
-  find the newest session transcript by file time;
-- reads session transcripts under `~/.omp/agent/sessions/`, `~/.claude/projects/` and
-  `~/.commandcode/projects/` (only the model name, title and token counts are used), and, if present, the
-  herdr-agent-usage cache under `~/.../herdr/plugins/herdr-agent-usage/`;
+- runs `powershell` (Windows) or `sh` + `ls` (macOS / Linux) every ~30 s per Claude Code / omp / Command
+  Code / Codex agent to find the newest session transcripts by file time;
+- reads session transcripts under `~/.omp/agent/sessions/`, `~/.claude/projects/`,
+  `~/.commandcode/projects/` and `~/.codex/sessions/` (the 24 newest uncompressed rollouts; only the folder,
+  model name, title and token counts are used), and, if present, the herdr-agent-usage cache under
+  `~/.../herdr/plugins/herdr-agent-usage/`;
 - for agents on another machine (a Herdr SSH machine), does the same there through the core (`exec` with
   `on`): `sh` to read the home folder, list transcripts with `ls -t` / `stat`, read the first 4 KiB and last
   1 MB of the newest ones with `head` / `tail`, and `omp usage --json` once a minute per machine; nothing is
@@ -139,10 +141,11 @@ each session until Command Code exits. Its only file is a small timestamp in `%T
   terminal is never assigned. If an agent has no transcript yet (omp writes it on the first message), it
   shows no model rather than a neighbour's. Matching by timing is a best effort when several agents sit
   idle in one folder. Model changes show up within ~40 s.
-- Command Code agents are matched by timing only (Command Code keeps its session title outside the
-  transcript). Headless `commandcode -p` runs in the same folder write transcripts there too, so one that
-  ran within seconds of an idle agent's last turn can show its model and context instead, until that agent's
-  next turn. Command Code agents are read on this computer only.
+- Command Code and Codex agents are matched by timing only (both keep their session titles outside the
+  transcript). Headless runs (`commandcode -p`, `codex exec`) in the same folder write transcripts too, so one
+  that ran within seconds of an idle agent's last turn can show its model and context instead, until that
+  agent's next turn. Command Code and Codex agents are read on this computer only. A Codex session idle for
+  so long that 24 newer rollouts exist elsewhere shows no model until its next turn.
 - **Remote agents** (omp or Claude Code on another Herdr machine) show their model, context and blocked
   reason like local ones. Their quota is **that machine's own** `omp usage` (its logins), never this
   computer's: if omp isn't installed or logged in there, the row says `quota not read on <machine>`. The
